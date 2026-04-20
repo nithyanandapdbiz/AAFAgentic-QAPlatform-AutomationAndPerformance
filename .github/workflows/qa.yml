@@ -1,0 +1,119 @@
+name: QA Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:           # allow manual trigger from GitHub UI
+
+permissions:
+  contents: write              # required to push commits back to the repo
+
+jobs:
+  qa:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout full history so git push works correctly ──────────────
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 2. Setup Node.js ──────────────────────────────────────────────────
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      # ── 3. Install dependencies ───────────────────────────────────────────
+      - name: Install dependencies
+        run: npm install
+
+      # ── 4. Install Playwright browsers ───────────────────────────────────
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      # ── 5. Run full QA pipeline ───────────────────────────────────────────
+      #       continue-on-error: true so test failures don't block artifact
+      #       upload and git push steps below.
+      - name: Run full QA pipeline
+        continue-on-error: true
+        run: node scripts/run-full-pipeline.js --headless
+        env:
+          ISSUE_KEY:          ${{ secrets.ISSUE_KEY }}
+          PROJECT_KEY:        ${{ secrets.PROJECT_KEY }}
+          JIRA_URL:           ${{ secrets.JIRA_URL }}
+          JIRA_EMAIL:         ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN:     ${{ secrets.JIRA_API_TOKEN }}
+          ZEPHYR_BASE_URL:    ${{ secrets.ZEPHYR_BASE_URL }}
+          ZEPHYR_ACCESS_KEY:  ${{ secrets.ZEPHYR_ACCESS_KEY }}
+          APPLITOOLS_API_KEY:    ${{ secrets.APPLITOOLS_API_KEY }}
+          USE_ULTRAFAST_GRID:    'true'
+          APPLITOOLS_CONCURRENCY: '5'
+          APPLITOOLS_BATCH_ID:   ${{ github.run_id }}
+          PW_HEADLESS:           'true'
+
+      # ── 6. Upload Playwright HTML report as artifact ──────────────────────
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 30
+
+      # ── 7. Upload custom QA report as artifact ────────────────────────────
+      - name: Upload custom QA report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: custom-qa-report
+          path: custom-report/
+          retention-days: 30
+
+      # ── 8. Upload Allure results as artifact ─────────────────────────────
+      - name: Upload Allure results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-results
+          path: allure-results/
+          retention-days: 30
+
+      # ── 9. Upload Allure HTML report as artifact ──────────────────────────
+      - name: Upload Allure report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-report
+          path: allure-report/
+          retention-days: 30
+
+      # ── 10. Commit generated artifacts back to main ───────────────────────
+      #        [skip ci] prevents this commit from re-triggering the workflow.
+      - name: Commit and push QA artifacts to main
+        if: always()
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Stage generated artifacts (ignore files not present)
+          git add -f test-results.json           2>/dev/null || true
+          git add -f test-results/               2>/dev/null || true
+          git add -f custom-report/              2>/dev/null || true
+          git add -f playwright-report/          2>/dev/null || true
+          git add -f allure-results/             2>/dev/null || true
+          git add -f allure-report/              2>/dev/null || true
+          git add -f .story-testcases.json       2>/dev/null || true
+          git add -f tests/specs/                2>/dev/null || true
+
+          # Only commit + push if there are staged changes
+          if git diff --cached --quiet; then
+            echo "No changes to commit — skipping push."
+          else
+            git commit -m "ci: update QA artifacts [skip ci]"
+            git push origin main
+          fi

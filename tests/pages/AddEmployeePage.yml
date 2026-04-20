@@ -1,0 +1,16 @@
+# AddEmployeePage locators
+# Application: OrangeHRM — https://opensource-demo.orangehrmlive.com
+# Route: /web/index.php/pim/addEmployee
+
+firstNameInput: 'input[name="firstName"]'
+middleNameInput: 'input[name="middleName"]'
+lastNameInput: 'input[name="lastName"]'
+
+# Employee ID — the sole input inside the row labelled "Employee Id"
+employeeIdGroup: '.oxd-input-group:has(label:text("Employee Id"))'
+employeeIdInput: '.oxd-input-group:has(label:text("Employee Id")) input.oxd-input'
+
+saveButton: 'button[type="submit"]'
+cancelButton: 'button.oxd-button--ghost'
+
+validationErrors: '.oxd-input-field-error-message'

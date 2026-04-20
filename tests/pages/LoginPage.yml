@@ -1,0 +1,8 @@
+# LoginPage locators
+# Application: OrangeHRM — https://opensource-demo.orangehrmlive.com
+# Route: /web/index.php/auth/login
+
+usernameInput: 'input[name="username"]'
+passwordInput: 'input[name="password"]'
+loginButton: 'button[type="submit"]'
+errorAlert: '.oxd-alert--error'

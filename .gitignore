@@ -1,0 +1,36 @@
+# ── Secrets & environment ─────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── Node ──────────────────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── Playwright ────────────────────────────────────────────────────────────
+playwright-report/
+test-results/
+test-results.json
+test-results-healed.json
+.auth/
+
+# ── Generated artifacts ───────────────────────────────────────────────────
+custom-report/
+tests/healed/
+.story-testcases.json
+allure-results/
+allure-report/
+.features-gen/
+
+# ── Logs ──────────────────────────────────────────────────────────────────
+logs/
+
+# ── OS ────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Editor ────────────────────────────────────────────────────────────────
+.vscode/
+*.log

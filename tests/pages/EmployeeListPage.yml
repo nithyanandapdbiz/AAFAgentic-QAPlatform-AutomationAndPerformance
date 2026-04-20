@@ -1,0 +1,11 @@
+# EmployeeListPage locators
+# Application: OrangeHRM — https://opensource-demo.orangehrmlive.com
+# Route: /web/index.php/pim/viewEmployeeList
+
+searchNameInput: '.oxd-autocomplete-text-input input'
+searchButton: 'button[type="submit"]'
+
+tableRows: '.oxd-table-body .oxd-table-row'
+noRecordsText: '.oxd-text:has-text("No Records Found")'
+
+paginationInfo: '.orangehrm-bottom-container'
