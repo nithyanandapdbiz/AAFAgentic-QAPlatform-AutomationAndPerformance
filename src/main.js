@@ -1,8 +1,11 @@
 require('dotenv').config();
 const express = require("express");
 const config = require("./core/config");
+const { initConfig } = require("./core/config");
 const routes = require("./api/routes");
 const logger = require("./utils/logger");
+const { securityHeaders } = require("./api/middleware/securityHeaders");
+const { rateLimiter }     = require("./api/middleware/rateLimiter");
 
 // Validate JIRA_URL is a well-formed absolute URL before starting
 const jiraUrl = process.env.JIRA_URL || '';
@@ -29,7 +32,13 @@ if (!process.env.JIRA_EMAIL || !process.env.JIRA_API_TOKEN) {
 }
 
 const app = express();
-app.use(express.json());
+app.disable('x-powered-by');
+
+// App-level hardening (applies to EVERY response, not just /api) ─────
+app.use(securityHeaders);
+app.use(rateLimiter);
+app.use(express.json({ limit: '1mb' }));
+
 app.use("/api", routes);
 
 // Global error handler — prevents unhandled errors from crashing the server
@@ -42,4 +51,18 @@ process.on("unhandledRejection", (reason) => {
   logger.error(`Unhandled rejection: ${reason}`);
 });
 
-app.listen(config.port, () => logger.info(`API server running on port ${config.port}`));
+// Async startup so initConfig() can resolve secrets before we accept traffic.
+(async () => {
+  try {
+    await initConfig();
+    logger.info(`Secrets loaded via provider: ${process.env.SECRETS_PROVIDER || 'env'}`);
+    logger.info(
+      `Security middleware loaded: rate-limit=${config.api.rateLimitMax}req/` +
+      `${config.api.rateLimitWindowMs}ms, auth=${process.env.API_SECRET ? 'token' : 'disabled'}`
+    );
+    app.listen(config.port, () => logger.info(`API server running on port ${config.port}`));
+  } catch (err) {
+    logger.error(`Server startup failed: ${err.message}`);
+    process.exit(1);
+  }
+})();

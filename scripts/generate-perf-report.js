@@ -704,7 +704,17 @@ if (require.main === module) {
 
   if (fs.existsSync(resultsDir)) {
     const { parsePerfResults, evaluateThresholds, compareToBaseline } = require('../src/services/perf.execution.service');
-    const files = fs.readdirSync(resultsDir).filter(f => f.endsWith('.json'));
+    // Only the raw k6 NDJSON output files are genuine inputs.
+    // Exclude sibling artefacts that live in the same dir:
+    //   *-summary.json    → k6 --summary-export output (read BY parsePerfResults, not fed to it)
+    //   *-thresholds.json → threshold snapshot written by saveThresholdsForRun (metadata only)
+    // Feeding those to parsePerfResults causes spurious "summary-export missing"
+    // warnings and pollutes the report with empty rows.
+    const files = fs.readdirSync(resultsDir).filter(f =>
+      f.endsWith('.json') &&
+      !f.endsWith('-summary.json') &&
+      !f.endsWith('-thresholds.json')
+    );
     for (const f of files) {
       const fp = path.join(resultsDir, f);
       try {

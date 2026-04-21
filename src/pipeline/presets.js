@@ -26,7 +26,8 @@ const PRESETS = {
     'syncGit',
   ],
 
-  // Full end-to-end: functional + perf + security (perf/sec run in parallel)
+  // Full end-to-end: functional + perf + security (sequential — each step is
+  // independently classified by the runner; see §5.8 of the platform docs).
   full: [
     'ensureDirs',
     'preFlight',
@@ -34,7 +35,8 @@ const PRESETS = {
     'generateSpecs',
     'proactiveHeal',
     'executeFunctional',
-    'executePerfSec',
+    'executePerformance',
+    'executeSecurity',
     'reactiveHeal',
     'createBugs',
     'generateReports',
@@ -48,7 +50,8 @@ const PRESETS = {
     'generateSpecs',
     'proactiveHeal',
     'executeFunctional',
-    'executePerfSec',
+    'executePerformance',
+    'executeSecurity',
     'reactiveHeal',
     'generateReports',
   ],

@@ -49,13 +49,34 @@ async function checkIssueKey() {
 }
 
 async function checkDirs() {
-  const needed = ['logs', 'tests/specs', 'perf/scripts', 'perf/results',
-                  'security/scripts', 'security/reports'];
+  // Pre-flight is responsible for output-directory creation so the pipeline
+  // starts clean on fresh checkouts. scripts/ensure-dirs.js is a safe no-op
+  // afterwards (kept only for legacy pipeline scripts that call it directly).
+  const needed = [
+    'logs',
+    'tests/specs',
+    'test-results',
+    'custom-report',
+    'allure-results',
+    'heal-artifacts',
+    'perf/scripts',
+    'perf/results',
+    'security/scripts',
+    'security/reports',
+  ];
+  const failed = [];
   for (const d of needed) {
     const p = path.join(ROOT, d);
-    if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
+    try {
+      if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
+    } catch (err) {
+      failed.push(`${d} (${err.message})`);
+    }
   }
-  return `${needed.length} directories OK`;
+  if (failed.length > 0) {
+    throw new Error(`Failed to create: ${failed.join(', ')}`);
+  }
+  return `${needed.length} directories ready`;
 }
 
 async function checkJira() {

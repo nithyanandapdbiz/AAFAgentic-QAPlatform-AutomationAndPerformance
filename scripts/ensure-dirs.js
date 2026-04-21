@@ -1,4 +1,9 @@
 'use strict';
+// NOTE: scripts/pre-flight.js also creates all required output directories
+// before the pipeline runs. This script performs the same operation and is
+// therefore a safe no-op on any pipeline run that starts with pre-flight.
+// It is retained for backward compatibility with legacy pipeline scripts
+// (qa-run.js, run-qa-complete.js, run-e2e.js) that call it directly.
 /**
  * ensure-dirs.js — Centralized output directory management
  * ─────────────────────────────────────────────────────────────────────────────

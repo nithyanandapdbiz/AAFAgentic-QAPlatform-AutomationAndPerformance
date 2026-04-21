@@ -105,6 +105,7 @@ The **Agentic QA Platform** is an enterprise-grade automation pipeline that turn
 |---|---|
 | [`.auth/`](.auth/) | Cached Playwright `storageState.json` (gitignored) |
 | `.env` / [`.env.example`](.env.example) | Runtime secrets and SLA knobs |
+| [`MIGRATION.md`](MIGRATION.md) | Deprecation schedule for legacy pipeline scripts (`qa-run.js`, `run-qa-complete.js`, `run-e2e.js`). Lists removal targets (v2.0.0), replacement commands, and step-by-step migration instructions. See also `logs/deprecation-warnings.log` for runtime audit trail. |
 | [`.eslintrc.json`](.eslintrc.json) | Lint rules (strict mode, `const`/`let`, `eqeqeq`) |
 | [`.github/`](.github/) | CI/CD workflows |
 | `.story-testcases.json` | Auto-cached Zephyr → story mapping |
@@ -114,7 +115,7 @@ The **Agentic QA Platform** is an enterprise-grade automation pipeline that turn
 | [`custom-report/`](custom-report/) | Self-contained HTML reports (functional, perf, security, applitools) |
 | [`dashboard/`](dashboard/) | React dashboard (standalone npm package) |
 | [`heal-artifacts/`](heal-artifacts/) | Baselines, diff masks, change manifest, heal report |
-| [`logs/`](logs/) | Winston logs (`app.log`, `error.log`, per-run diagnostics) |
+| [`logs/`](logs/) | Winston logs (`app.log`, `error.log`, per-run diagnostics), `agent-decisions.json` (agent observability), `deprecation-warnings.log` (legacy script usage audit), `pipeline-failure-report.{json,md}` (critical halt report), `preflight-report.json` (pre-flight check results), `secret-access.log` (secrets provider audit — G2), `cleanup-report.json` (artifact retention — G4), `.pipeline.lock` (runtime concurrency lock — G3) |
 | `node_modules/` | NPM deps |
 | [`package.json`](package.json) | Scripts, deps, engines |
 | [`playwright-report/`](playwright-report/) | Built-in Playwright HTML report |
@@ -294,7 +295,7 @@ Consolidated orchestration layer introduced to replace the copy-pasted `STAGES[]
 
 | File | Responsibility |
 |---|---|
-| [src/pipeline/steps.js](src/pipeline/steps.js) | 13 named async steps: `ensureDirs`, `preFlight`, `fetchStory`, `generateSpecs`, `proactiveHeal`, `executeFunctional`, `executePerfSec` (parallel), `executePerformance`, `executeSecurity`, `reactiveHeal`, `createBugs`, `generateReports`, `syncGit`. Each is `(ctx) => ctx`, throws classified `AppError` subclasses, never calls `process.exit`. |
+| [src/pipeline/steps.js](src/pipeline/steps.js) | 12 named async steps: `ensureDirs`, `preFlight`, `fetchStory`, `generateSpecs`, `proactiveHeal`, `executeFunctional`, `executePerformance`, `executeSecurity`, `reactiveHeal`, `createBugs`, `generateReports`, `syncGit`. Each is `async (ctx) => ctx`, throws classified `AppError` subclasses, never calls `process.exit`. The runner iterates the preset sequentially — `executePerformance` and `executeSecurity` are independent non-critical steps, each classified individually; a failure in one does not abort the other. |
 | [src/pipeline/runner.js](src/pipeline/runner.js) | `runPipeline(stepNames, ctx)` → `{ passed, failed, warned, skipped, steps[], halted, durationMs }`. Critical step failure halts the run and writes `logs/pipeline-failure-report.json` with the classified error + recovery hint. |
 | [src/pipeline/presets.js](src/pipeline/presets.js) | Named sequences: `functional`, `full`, `scoped` (CI), `perfOnly`, `secOnly`. |
 
@@ -307,6 +308,8 @@ npm run pipeline:full
 ```
 
 Setting `PIPELINE_USE_RUNNER=true` in the environment has the same effect. Without the flag, [`run-full-pipeline.js`](scripts/run-full-pipeline.js) retains its original `STAGES[]` path verbatim — existing CI integrations are unchanged.
+
+> **Deprecation note.** `--use-runner` / `PIPELINE_USE_RUNNER=true` are the currently-shipping opt-in switches. A future major release will make the consolidated runner the default and remove the legacy `STAGES[]` path; `npm run pipeline:full` and the CI workflow already use the runner today, so no action is required for new integrations.
 
 **Step contract.** Every step in [src/pipeline/steps.js](src/pipeline/steps.js) conforms to:
 
@@ -421,7 +424,7 @@ Selectors live in YAML files and are loaded at class construction by [tests/help
 | [generate-sec-scripts.js](scripts/generate-sec-scripts.js) | Story → ZAP config via `security.agent`. |
 | **Reports** | |
 | [generate-report.js](scripts/generate-report.js) | Custom functional HTML (pie chart, per-test cards, embedded media). |
-| [generate-perf-report.js](scripts/generate-perf-report.js) | Chart.js-powered perf HTML. |
+| [generate-perf-report.js](scripts/generate-perf-report.js) | Chart.js-powered perf HTML. Scans `test-results/perf/*.json` **excluding** `*-summary.json` (k6 `--summary-export` output consumed internally by `parsePerfResults`) and `*-thresholds.json` (metadata snapshot from `saveThresholdsForRun`) — feeding those siblings to the parser was producing spurious `summary-export missing` warnings and empty rows in the report. |
 | [generate-sec-report.js](scripts/generate-sec-report.js) | OWASP-mapped ZAP HTML. |
 | [generate-allure-report.js](scripts/generate-allure-report.js) | Allure HTML via `allure-commandline`. |
 | **Integrations** | |
@@ -438,8 +441,9 @@ Selectors live in YAML files and are loaded at class construction by [tests/help
 | [api-schema-diff.js](scripts/api-schema-diff.js) | API response schema diff. |
 | [resolve-affected-pages.js](scripts/resolve-affected-pages.js) | Legacy page-mapper (git diff → pages). |
 | **Diagnostics** | |
-| [pre-flight.js](scripts/pre-flight.js) | Parallel health checks (< 10 s, `Promise.allSettled`): `ISSUE_KEY` present, dirs exist, Jira `GET /myself` OK, Zephyr `GET /healthcheck` OK, `k6` on PATH (critical when `--include-perf`), ZAP/docker available (critical when `--include-security`). Exit 1 on any critical failure. Full check matrix below. |
+| [pre-flight.js](scripts/pre-flight.js) | Parallel health checks (< 10 s, `Promise.allSettled`): `ISSUE_KEY` present, dirs created if missing, Jira `GET /myself` OK, Zephyr `GET /healthcheck` OK, `k6` on PATH (critical when `--include-perf`), ZAP/docker available (critical when `--include-security`). Exit 1 on any critical failure. Full check matrix below. |
 | [ensure-dirs.js](scripts/ensure-dirs.js) | Guarantees all output directories exist. |
+| [cleanup-artifacts.js](scripts/cleanup-artifacts.js) | **Artifact retention sweeper (G4).** Deletes `test-results/`, `playwright-report/`, `allure-*`, `custom-report/`, `screenshots/`, `heal-artifacts/` files older than `ARTIFACT_RETENTION_DAYS` (default 30). Supports `--dry-run` and `--aggressive` (half retention). Writes rolling summary to `logs/cleanup-report.json`. Scheduled nightly by the `artifact-cleanup` GH Actions job. Preserves `.gitkeep` and the entire `logs/` tree. |
 | [test-agents.js](scripts/test-agents.js) | Offline agent smoke test. |
 | [test-endpoints.js](scripts/test-endpoints.js) | HTTP smoke test against `localhost:3000`. |
 | [validate-integration.js](scripts/validate-integration.js) | Live Jira + Zephyr connectivity probe. |
@@ -579,6 +583,18 @@ thresholds: {
 
 [`generate-perf-report.js`](scripts/generate-perf-report.js) renders per-test-type dashboards with Chart.js, SLA breach markers, and baseline deltas. Aggregated via `GET /perf/summary`.
 
+**Input discipline (standalone CLI path).** The CLI entry point (`npm run perf:report`, Stage 12 of [`run-e2e.js`](scripts/run-e2e.js)) globs `test-results/perf/` and filters to raw k6 NDJSON files only:
+
+```js
+const files = fs.readdirSync(resultsDir).filter(f =>
+  f.endsWith('.json') &&
+  !f.endsWith('-summary.json') &&   // k6 --summary-export output (read BY parsePerfResults)
+  !f.endsWith('-thresholds.json')   // metadata snapshot from saveThresholdsForRun
+);
+```
+
+[`scripts/run-perf.js`](scripts/run-perf.js) is unaffected — it builds its `allResults` from `runOneScript()` return values and never scans the directory.
+
 ---
 
 ## 11. Security Testing Subsystem
@@ -695,10 +711,9 @@ qa.yml (GitHub Actions)
         ├── fetchStory          (critical)      → Jira → agent pipeline → Zephyr
         ├── generateSpecs       (critical)      → exit 2 on zero specs → PreconditionError
         ├── proactiveHeal       (non-critical)
-        ├── executePerfSec      (parallel, non-critical)
-        │     ├── executePerformance
-        │     └── executeSecurity
         ├── executeFunctional   (critical)
+        ├── executePerformance  (non-critical)    → k6 per test-type
+        ├── executeSecurity     (non-critical)    → OWASP ZAP
         ├── reactiveHeal        (non-critical)
         ├── createBugs          (non-critical)
         ├── generateReports     (non-critical)   → custom + Allure + decision-log section
@@ -858,6 +873,7 @@ All programmatic errors raised by agents, services, and pipeline steps extend `A
 | `SpawnError`       | `SPAWN_FAILED`         | 500      | Binary missing / EACCES / ENOENT                           | Verify the binary is installed and on PATH (`where k6` / `where npx`).            |
 | `UpstreamError`    | `UPSTREAM_UNAVAILABLE` | 502      | Jira, Zephyr, ZAP not reachable                            | Verify credentials and connectivity to the upstream service.                      |
 | `PreconditionError`| `PRECONDITION_FAILED`  | 412      | Zero specs generated, missing handoff file, missing inputs | Run the prior stage or ensure required inputs exist.                              |
+| `NonZeroExitError` | `BUFFER_OVERFLOW`      | 500      | Playwright stdout exceeded `PLAYWRIGHT_MAX_BUFFER_MB`      | Raise `PLAYWRIGHT_MAX_BUFFER_MB` or set `PLAYWRIGHT_STREAM_OUTPUT=true`.           |
 
 **Zero-spec guard.** [`scripts/generate-playwright.js`](scripts/generate-playwright.js) exits with **code `2`** (distinct from `1`) whenever it writes no specs. The `generateSpecs` step in [src/pipeline/steps.js](src/pipeline/steps.js) converts that into a `PreconditionError` with a specific recovery hint ("Re-run scripts/run-story.js…"), which halts the pipeline before functional execution would have failed en masse.
 
@@ -868,7 +884,7 @@ All programmatic errors raised by agents, services, and pipeline steps extend `A
 | # | Check                  | How                                          | Critical when                          |
 |---|------------------------|----------------------------------------------|----------------------------------------|
 | 1 | `ISSUE_KEY` present    | `process.env.ISSUE_KEY` regex `^[A-Z]+-\d+$` | Always                                 |
-| 2 | Output dirs exist      | `fs.existsSync` on `logs/`, `test-results/`, `custom-report/` | Always                |
+| 2 | Output dirs ready      | `fs.mkdirSync({ recursive: true })` on 10 required dirs — creates if missing, no-op if present. Eliminates fresh-checkout failure. | Always |
 | 3 | Jira auth              | Native `fetch` → `GET /rest/api/3/myself`    | Always                                 |
 | 4 | Zephyr auth            | `GET /healthcheck` with bearer token         | Always                                 |
 | 5 | `k6` on PATH           | `where k6` / `which k6` or `PERF_K6_BINARY` resolvable | `--include-perf`             |
@@ -916,6 +932,45 @@ for `ISSUE_KEY=SCRUM-5`, then re-trigger the pipeline.
 | generateSpecs     | ❌ failed | 842 ms   |
 | executeFunctional | ⏭ skipped| —        |
 ```
+
+---
+
+## 20. Operational Runbook
+
+Production-readiness concerns (security, resilience, observability, hygiene). Each subsection documents the runtime primitive, the env knobs, and the incident playbook.
+
+### 20.1 Artifact retention
+
+- **Policy:** all `test-results/`, `playwright-report/`, `allure-*`, `custom-report/`, `screenshots/`, `heal-artifacts/` files older than `ARTIFACT_RETENTION_DAYS` (default **30**) are deleted by [`scripts/cleanup-artifacts.js`](scripts/cleanup-artifacts.js).
+- **Scheduling:** the `artifact-cleanup` GH Actions job in [`.github/workflows/qa.yml`](.github/workflows/qa.yml) runs nightly (`cron: '0 2 * * *'`).
+- **Local usage:** `npm run cleanup:dry-run` (safe preview) → `npm run cleanup:artifacts` (live) → `npm run cleanup:artifacts:aggressive` (half retention).
+- **Safety:** `.gitkeep` files and the entire `logs/` tree are never touched. Every run appends a summary to `logs/cleanup-report.json` (rolling last 100 entries).
+
+### 20.2 Scaling considerations
+
+- **Single-pipeline-per-host.** Concurrency is enforced by a filesystem lock at `logs/.pipeline.lock` (`src/utils/pipelineLock.js`). If you need horizontal scaling, externalise the lock to Redis (`SET NX PX`) or replace with a queue (BullMQ, SQS, etc.) keyed on `PROJECT_KEY`.
+- **Webhook hardening.** `/api/webhook/jira` is HMAC-signed (`WEBHOOK_SECRET`) and rate-limited by the global API limiter (`RATE_LIMIT_MAX` per `RATE_LIMIT_WINDOW_MS`, default 100/min). Rate-limit state is in-memory; horizontal scale requires a shared store.
+- **Playwright memory.** Default 50 MB stdout buffer (`PLAYWRIGHT_MAX_BUFFER_MB`). For long soak suites, set `PLAYWRIGHT_STREAM_OUTPUT=true` to stream output to `logs/playwright-<ts>.log` with bounded RAM.
+- **Secrets at scale.** Switch `SECRETS_PROVIDER` from `env` to `vault` to pull credentials from HashiCorp Vault on startup; `logs/secret-access.log` records every key access (key + provider + resolvedLength, never the value).
+
+### 20.3 Secret rotation
+
+1. Update the secret in your provider (Vault KV path set via `VAULT_SECRET_PATH`, default `secret/data/agentic-qa`; or `.env` when `SECRETS_PROVIDER=env`).
+2. Restart the API server (`npm run start:server`) — `initConfig()` re-reads secrets on boot.
+3. In-flight pipelines finish with the previous secret (they read `process.env` / cache at start); new triggers use the rotated value.
+4. Verify `logs/secret-access.log` shows a post-restart access entry with the new `resolvedLength`.
+
+### 20.4 Monitoring checklist
+
+| Signal                                                            | Where                                             | Action                                                                  |
+|-------------------------------------------------------------------|---------------------------------------------------|-------------------------------------------------------------------------|
+| `auth-failure` log lines in `logs/app.log`                        | Winston                                           | Check client configs / possible credential leak; rotate `API_SECRET`.   |
+| `rate-limited` log lines                                          | Winston                                           | Raise `RATE_LIMIT_MAX` or investigate caller.                           |
+| `Pipeline already running` 409 from `/webhook/manual`             | HTTP response                                     | Expected under load; inspect `logs/.pipeline.lock` for incumbent pid.   |
+| `BUFFER_OVERFLOW` error class in `logs/pipeline-failure-report.*` | Failure report                                    | Raise `PLAYWRIGHT_MAX_BUFFER_MB` or enable streaming mode.              |
+| `logs/secret-access.log` growing unexpectedly                     | Filesystem                                        | Audit for unintended callers of `getSecret()`.                          |
+| `logs/cleanup-report.json` with `removedFiles: 0` for > 7 days    | Filesystem                                        | Verify the nightly GH Actions `artifact-cleanup` job is running.        |
+| Size > 20 MB on `logs/app.log` or `logs/error.log`                | Filesystem                                        | Winston rotates at `LOG_MAX_SIZE_BYTES`; rotated copies auto-pruned.    |
 
 ---
 

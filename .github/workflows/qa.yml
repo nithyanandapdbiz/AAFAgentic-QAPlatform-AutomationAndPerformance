@@ -5,12 +5,35 @@ on:
     branches:
       - main
   workflow_dispatch:           # allow manual trigger from GitHub UI
+  schedule:
+    - cron: '0 2 * * *'        # nightly artifact cleanup (2am UTC)
 
 permissions:
   contents: write              # required to push commits back to the repo
 
 jobs:
+  artifact-cleanup:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci --omit=optional || npm install --no-audit --no-fund
+      - run: npm run cleanup:artifacts
+        env:
+          ARTIFACT_RETENTION_DAYS: '30'
+      - name: Upload cleanup report
+        uses: actions/upload-artifact@v4
+        with:
+          name: cleanup-report
+          path: logs/cleanup-report.json
+          if-no-files-found: ignore
+
   qa:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
 
     steps:

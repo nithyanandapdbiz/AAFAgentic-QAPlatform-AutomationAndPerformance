@@ -40,10 +40,28 @@ const { spawnSync, spawn } = require('child_process');
 const fs                   = require('fs');
 const path                 = require('path');
 const readline             = require('readline');
+const { acquireLock, releaseLock } = require('../src/utils/pipelineLock');
 
 const ROOT  = path.resolve(__dirname, '..');
 const args  = process.argv.slice(2);
 const flags = new Set(args.map(a => a.toLowerCase()));
+
+// ─── Pipeline-wide exclusive lock ──────────────────────────────────────────
+// Prevents overlapping runs (CI + webhook + local). Released on any exit path.
+const _lockIssueKey = process.env.ISSUE_KEY || 'ad-hoc';
+const _lockResult = acquireLock(_lockIssueKey);
+if (!_lockResult.acquired) {
+  const inc = _lockResult.incumbent || {};
+  console.error(
+    `[Pipeline] Refusing to start: another pipeline is running ` +
+    `(pid ${inc.pid}, issue ${inc.issueKey || 'unknown'}). ` +
+    `Wait for it to finish or remove the stale lock after confirming the process is dead.`
+  );
+  process.exit(2);
+}
+process.once('exit',    () => releaseLock());
+process.once('SIGINT',  () => { releaseLock(); process.exit(130); });
+process.once('SIGTERM', () => { releaseLock(); process.exit(143); });
 
 // ─── Opt-in new pipeline runner (backward-compatible) ─────────────────────
 // When PIPELINE_USE_RUNNER=true or --use-runner is passed, delegate to the

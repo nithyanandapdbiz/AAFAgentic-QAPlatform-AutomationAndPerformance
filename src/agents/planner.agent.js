@@ -174,6 +174,38 @@ function extractText(node) {
 
 function lower(text) { return (text || "").toLowerCase(); }
 
+/**
+ * Tokenise text into a clean whole-word array.
+ * Strips punctuation by replacing it with spaces (NOT empty string), so
+ * "auth," becomes "auth" and "oauth," becomes "oauth" — they remain distinct
+ * tokens. This is the foundation of word-boundary keyword matching.
+ * @param {string} text
+ * @returns {string[]} lowercase whole-word tokens
+ */
+function tokenise(text) {
+  return (text || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")   // punctuation → space (preserves word boundaries)
+    .split(/\s+/)
+    .filter(t => t.length > 0);
+}
+
+/**
+ * Word-boundary-safe keyword hit test.
+ *   • single-word keyword → exact token-set membership (O(1))
+ *   • multi-word phrase   → padded-substring on the normalised token stream
+ * Prevents false positives like "load" matching inside "upload".
+ * @param {string} keyword
+ * @param {Set<string>} tokenSet
+ * @param {string} paddedText  " tok1 tok2 tok3 " (leading+trailing space)
+ * @returns {boolean}
+ */
+function keywordMatches(keyword, tokenSet, paddedText) {
+  const kw = keyword.toLowerCase();
+  if (kw.indexOf(" ") === -1) return tokenSet.has(kw);
+  return paddedText.indexOf(` ${kw} `) !== -1;
+}
+
 async function plan(story) {
   const fields      = story.fields || {};
   const summary     = lower(fields.summary || "");
@@ -181,12 +213,17 @@ async function plan(story) {
   const ac          = lower(extractText(fields.customfield_10016) || extractText(fields.customfield_10014) || "");
   const allText     = `${summary} ${description} ${ac}`;
 
+  // ── Word-boundary tokenisation (shared by all keyword lookups) ──
+  const tokens     = tokenise(allText);
+  const tokenSet   = new Set(tokens);
+  const paddedText = ` ${tokens.join(" ")} `;
+
   // ── Weighted score aggregation per category ─────────────────────
   const categoryScores = {};
   const matchedKeywords = []; // for decision log
 
   for (const entry of WEIGHTED_KEYWORDS) {
-    if (allText.includes(entry.keyword)) {
+    if (keywordMatches(entry.keyword, tokenSet, paddedText)) {
       const s = entry.weight;
       categoryScores[entry.category] = (categoryScores[entry.category] || 0) + s;
       matchedKeywords.push({ keyword: entry.keyword, weight: s, category: entry.category });
@@ -221,15 +258,15 @@ async function plan(story) {
     ? +((topThree.reduce((a, b) => a + b.confidence, 0) / topThree.length).toFixed(3))
     : 0;
 
-  // ── Design techniques (kept simple: still keyword-based) ────────
+  // ── Design techniques (word-boundary safe) ─────────────────────
   const designTechniques = Object.entries(TECHNIQUE_SIGNALS)
-    .filter(([, keywords]) => keywords.some(k => allText.includes(k)))
+    .filter(([, keywords]) => keywords.some(k => keywordMatches(k, tokenSet, paddedText)))
     .map(([technique]) => technique);
   if (designTechniques.length === 0) designTechniques.push("Equivalence Partitioning", "Error Guessing");
 
-  // ── Risks ──────────────────────────────────────────────────────
+  // ── Risks (word-boundary safe) ─────────────────────────────────
   const risks = RISK_SIGNALS
-    .filter(r => allText.includes(r.keyword))
+    .filter(r => keywordMatches(r.keyword, tokenSet, paddedText))
     .map(r => r.risk);
 
   const criticalScenarios = [
@@ -374,4 +411,4 @@ function augmentPlan(fields, allText, existingTypes, existingTechniques) {
   };
 }
 
-module.exports = { plan, extractText };
+module.exports = { plan, extractText, tokenise, keywordMatches };

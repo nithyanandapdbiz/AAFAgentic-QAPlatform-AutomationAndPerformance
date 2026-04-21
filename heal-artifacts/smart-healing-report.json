@@ -1,15 +1,7 @@
 {
-  "generatedAt": "2026-04-21T11:30:03.744Z",
+  "generatedAt": "2026-04-21T12:43:59.431Z",
   "dryRun": false,
-  "strategies": {
-    "frontend": {
-      "yamlChanges": 0,
-      "specChanges": 0
-    },
-    "config": {
-      "specChanges": 0
-    }
-  },
+  "strategies": {},
   "zephyrChanges": [],
   "summary": {
     "yamlChanges": 0,

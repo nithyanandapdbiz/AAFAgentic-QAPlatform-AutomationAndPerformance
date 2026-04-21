@@ -6,42 +6,38 @@ const { listAll, getSummary, listByTest, serveScreenshot } = require("./screensh
 const { getSecuritySummary } = require("./security.controller");
 const { getPerfSummary } = require("./perf.controller");
 const { getAgentDecisions } = require("./agentDecisions.controller");
+const { authGuard }        = require("./middleware/authGuard");
+const { rateLimiter }      = require("./middleware/rateLimiter");
+const { securityHeaders }  = require("./middleware/securityHeaders");
 
 const router = express.Router();
 
-// ── Authentication middleware (opt-in via API_SECRET env var) ────────
-function authMiddleware(req, res, next) {
-  const secret = process.env.API_SECRET;
-  if (!secret) return next(); // no secret configured — skip auth
-  const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
-  if (token !== secret) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-  next();
-}
+// Global middleware: applies to ALL routes in this router.
+router.use(securityHeaders);
+router.use(rateLimiter);
 
-// ── Dashboard ─────────────────────────────────────────────────────
-router.get("/dashboard", getDashboard);
+// ── Dashboard (auth-gated when API_SECRET set) ─────────────────────
+router.get("/dashboard", authGuard, getDashboard);
 
 // ── Webhooks ──────────────────────────────────────────────────────
-router.post("/webhook/jira",   handleJiraWebhook);    // Jira → auto-trigger pipeline
-router.post("/webhook/manual", authMiddleware, handleManualTrigger);   // Manual API trigger
-router.get("/webhook/status",  authMiddleware, getWebhookStatus);      // Webhook config & recent triggers
+// POST /webhook/jira is protected by HMAC (verifySignature) — NOT by authGuard.
+router.post("/webhook/jira",   handleJiraWebhook);
+router.post("/webhook/manual", authGuard, handleManualTrigger);
+router.get("/webhook/status",  authGuard, getWebhookStatus);
 
 // ── Screenshots ───────────────────────────────────────────────────
-router.get("/screenshots/summary",     getSummary);           // Aggregated stats
-router.get("/screenshots",             listAll);              // All tests + screenshots
-router.get("/screenshots/:test",       listByTest);           // Screenshots for one test
-router.get("/screenshots/:test/:file", serveScreenshot);      // Serve image file
+router.get("/screenshots/summary",     authGuard, getSummary);
+router.get("/screenshots",             authGuard, listAll);
+router.get("/screenshots/:test",       authGuard, listByTest);
+router.get("/screenshots/:test/:file", authGuard, serveScreenshot);
 
 // ── Security ──────────────────────────────────────────────────────
-router.get("/security/summary",        getSecuritySummary);  // Latest security scan summary
+router.get("/security/summary",        authGuard, getSecuritySummary);
 
 // ── Performance ───────────────────────────────────────────────────
-router.get("/perf/summary",            getPerfSummary);      // Latest performance test summary
+router.get("/perf/summary",            authGuard, getPerfSummary);
 
 // ── Agent Decisions (observability) ───────────────────────────────
-// ?limit=N (1..200, default 50)  &  ?agentName=planner|qa|reviewer|riskPrioritizer|executor
-router.get("/agent-decisions",         authMiddleware, getAgentDecisions);
+router.get("/agent-decisions",         authGuard, getAgentDecisions);
 
 module.exports = router;

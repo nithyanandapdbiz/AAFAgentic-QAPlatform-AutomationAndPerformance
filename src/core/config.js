@@ -88,4 +88,55 @@ module.exports = {
     // Also used by QA agent to trigger fallback test cases.
     confidenceThreshold: parseFloat(process.env.AGENT_CONFIDENCE_THRESHOLD || '0.4'),
   },
+  // ─── API security ──────────────────────────────────────────────────
+  api: {
+    rateLimitWindowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000', 10),
+    rateLimitMax:      parseInt(process.env.RATE_LIMIT_MAX       || '100',   10),
+  },
+  // ─── Playwright execution ──────────────────────────────────────────
+  playwright: {
+    maxBufferMb:   parseInt(process.env.PLAYWRIGHT_MAX_BUFFER_MB    || '50',     10),
+    streamOutput:  process.env.PLAYWRIGHT_STREAM_OUTPUT === 'true',
+    execTimeoutMs: parseInt(process.env.PLAYWRIGHT_EXEC_TIMEOUT_MS  || '300000', 10),
+  },
+  // ─── Pipeline concurrency ──────────────────────────────────────────
+  pipeline: {
+    lockTimeoutMs: parseInt(process.env.PIPELINE_LOCK_TIMEOUT_MS || '1800000', 10),
+  },
 };
+
+// ─── Async secrets initialisation (opt-in) ─────────────────────────────────
+// Back-compat: the default export above is synchronous and reads directly
+// from process.env, so every existing consumer continues to work unchanged.
+// NEW: call `await initConfig()` in entry-points that want provider-backed
+// secrets (vault / aws). The function mutates the exported object in place,
+// so subsequent `require('./config')` calls see the resolved values.
+let _initialised = (process.env.SECRETS_PROVIDER || 'env') === 'env';
+
+async function initConfig() {
+  if (_initialised) return module.exports;
+  const { getSecret } = require('../utils/secrets');
+  module.exports.jira.token      = await getSecret('JIRA_API_TOKEN');
+  module.exports.zephyr.token    = await getSecret('ZEPHYR_ACCESS_KEY');
+  if (process.env.ZAP_API_KEY   || process.env.SECRETS_PROVIDER === 'vault') {
+    try { process.env.ZAP_API_KEY   = await getSecret('ZAP_API_KEY');   } catch (_e) { /* optional */ }
+  }
+  if (process.env.WEBHOOK_SECRET || process.env.SECRETS_PROVIDER === 'vault') {
+    try { process.env.WEBHOOK_SECRET = await getSecret('WEBHOOK_SECRET'); } catch (_e) { /* optional */ }
+  }
+  if (process.env.API_SECRET    || process.env.SECRETS_PROVIDER === 'vault') {
+    try { process.env.API_SECRET    = await getSecret('API_SECRET');    } catch (_e) { /* optional */ }
+  }
+  _initialised = true;
+  return module.exports;
+}
+
+function getConfig() {
+  if (!_initialised) {
+    throw new Error('Config not initialised — call await initConfig() before accessing config');
+  }
+  return module.exports;
+}
+
+module.exports.initConfig = initConfig;
+module.exports.getConfig  = getConfig;

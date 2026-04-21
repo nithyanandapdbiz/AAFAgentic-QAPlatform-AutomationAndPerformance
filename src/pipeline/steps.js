@@ -167,19 +167,6 @@ async function executeSecurity(ctx) {
   return ctx;
 }
 
-/** Execute perf + security in parallel when both enabled (otherwise sequential single-run). */
-async function executeParallelPerfSec(ctx) {
-  const tasks = [];
-  if (ctx.flags?.includePerf)     tasks.push(executePerformance(ctx));
-  if (ctx.flags?.includeSecurity) tasks.push(executeSecurity(ctx));
-  if (tasks.length === 0) return ctx;
-  // allSettled so one side's failure doesn't abort the other
-  const outcomes = await Promise.allSettled(tasks);
-  const firstError = outcomes.find(o => o.status === 'rejected');
-  if (firstError) throw firstError.reason;
-  return ctx;
-}
-
 async function reactiveHeal(ctx) {
   if (ctx.flags?.skipHeal) return ctx;
   try {
@@ -224,7 +211,6 @@ const STEPS = {
   generateSpecs:      { fn: generateSpecs,          critical: true  },
   proactiveHeal:      { fn: proactiveHeal,          critical: false },
   executeFunctional:  { fn: executeFunctional,      critical: false },
-  executePerfSec:     { fn: executeParallelPerfSec, critical: false },
   executePerformance: { fn: executePerformance,     critical: false },
   executeSecurity:    { fn: executeSecurity,        critical: false },
   reactiveHeal:       { fn: reactiveHeal,           critical: false },

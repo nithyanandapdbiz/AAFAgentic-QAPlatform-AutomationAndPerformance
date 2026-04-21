@@ -47,7 +47,10 @@
     "test:unit": "npx playwright test --config=playwright.unit.config.js",
     "pipeline:full": "node scripts/run-full-pipeline.js --use-runner --include-perf --include-security",
     "pipeline:functional": "node scripts/run-full-pipeline.js --use-runner",
-    "preflight": "node scripts/pre-flight.js"
+    "preflight": "node scripts/pre-flight.js",
+    "cleanup:dry-run": "node scripts/cleanup-artifacts.js --dry-run",
+    "cleanup:artifacts": "node scripts/cleanup-artifacts.js",
+    "cleanup:artifacts:aggressive": "node scripts/cleanup-artifacts.js --aggressive"
   },
   "dependencies": {
     "axios": "^1.6.0",

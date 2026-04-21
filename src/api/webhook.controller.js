@@ -24,6 +24,7 @@ const crypto  = require("crypto");
 const path    = require("path");
 const { spawnSync } = require("child_process"); // eslint-disable-line no-unused-vars
 const logger  = require("../utils/logger");
+const { getActiveLock } = require("../utils/pipelineLock");
 
 const ROOT         = path.resolve(__dirname, "..", "..");
 const PROJECT_KEY  = process.env.PROJECT_KEY || "SCRUM";
@@ -175,6 +176,17 @@ function handleJiraWebhook(req, res) {
     return res.status(200).json({ action: "throttled", reason: `${issueKey} ran < 5 min ago` });
   }
 
+  // 4b. Concurrency guard — single pipeline at a time
+  const active = getActiveLock();
+  if (active) {
+    logger.warn(`[Webhook] Pipeline busy (pid ${active.pid}, issue ${active.issueKey}) — rejecting ${issueKey}`);
+    return res.status(409).json({
+      action: "rejected",
+      reason: "Pipeline already running",
+      incumbent: { pid: active.pid, issueKey: active.issueKey, startedAt: new Date(active.startedAt).toISOString() }
+    });
+  }
+
   // 5. Trigger pipeline
   const pid = triggerPipeline(issueKey, reason);
 
@@ -200,6 +212,15 @@ function handleManualTrigger(req, res) {
 
   if (isOnCooldown(issueKey)) {
     return res.status(200).json({ action: "throttled", reason: `${issueKey} ran < 5 min ago` });
+  }
+
+  const active = getActiveLock();
+  if (active) {
+    return res.status(409).json({
+      action: "rejected",
+      reason: "Pipeline already running",
+      incumbent: { pid: active.pid, issueKey: active.issueKey, startedAt: new Date(active.startedAt).toISOString() }
+    });
   }
 
   const pid = triggerPipeline(issueKey, "Manual API trigger");
