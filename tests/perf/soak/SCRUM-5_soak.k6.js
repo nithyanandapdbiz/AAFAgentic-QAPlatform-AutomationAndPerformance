@@ -1,6 +1,6 @@
 // storyKey: SCRUM-5
 // testType: soak
-// generated: 2026-04-21T16:44:09.176Z
+// generated: 2026-04-21T16:55:03.373Z
 // WARNING: Journey could not be inferred — manual customisation required.
 
 import http from 'k6/http';

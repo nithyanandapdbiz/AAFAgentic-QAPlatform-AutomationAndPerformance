@@ -6,9 +6,9 @@ firstNameInput: 'input[name="firstName"]'
 middleNameInput: 'input[name="middleName"]'
 lastNameInput: 'input[name="lastName"]'
 # healed: 2026-04-21
-employeeIdGroup: '.oxd-input-group:has(label.oxd-label:text-is("Employee"))'
+employeeIdGroup: '.oxd-input-group:has(label.oxd-label:text-is("Employee Id"))'
 # healed: 2026-04-21
-employeeIdInput: '.oxd-input-group:has(label.oxd-label:text-is("Employee")) input.oxd-input'
+employeeIdInput: '.oxd-input-group:has(label.oxd-label:text-is("Employee Id")) input.oxd-input'
 saveButton: 'button[type="submit"]'
 cancelButton: 'button.oxd-button--ghost'
 validationErrors: '.oxd-input-field-error-message'
