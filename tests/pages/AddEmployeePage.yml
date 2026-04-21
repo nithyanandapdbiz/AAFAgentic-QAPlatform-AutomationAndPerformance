@@ -7,8 +7,8 @@ middleNameInput: 'input[name="middleName"]'
 lastNameInput: 'input[name="lastName"]'
 
 # Employee ID — the sole input inside the row labelled "Employee Id"
-employeeIdGroup: '.oxd-input-group:has(label:text("Employee Id"))'
-employeeIdInput: '.oxd-input-group:has(label:text("Employee Id")) input.oxd-input'
+employeeIdGroup: '.oxd-input-group:has(label:text("Employee"))'
+employeeIdInput: '.oxd-input-group:has(label:text("Employee")) input.oxd-input'
 
 saveButton: 'button[type="submit"]'
 cancelButton: 'button.oxd-button--ghost'
