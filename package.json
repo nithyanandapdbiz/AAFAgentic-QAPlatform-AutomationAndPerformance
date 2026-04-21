@@ -9,7 +9,7 @@
     "qa": "node scripts/qa-run.js",
     "qa:run": "node scripts/qa-run.js --run-only",
     "qa:generate": "node scripts/qa-run.js --skip-story",
-    "qa:full":             "node scripts/qa-run.js --include-perf --include-security",
+    "qa:full": "node scripts/qa-run.js --include-perf --include-security",
     "report": "node scripts/generate-report.js",
     "report:allure": "node scripts/generate-allure-report.js",
     "allure:open": "npx allure open allure-report",
@@ -29,17 +29,28 @@
     "qa:complete:headless": "node scripts/run-qa-complete.js --headless",
     "qa:with-security": "node scripts/qa-run.js --include-security",
     "e2e": "node scripts/run-e2e.js",
+    "e2e:headed": "node scripts/run-e2e.js",
     "e2e:headless": "node scripts/run-e2e.js --headless",
     "e2e:no-perf": "node scripts/run-e2e.js --skip-perf",
     "e2e:no-security": "node scripts/run-e2e.js --skip-security",
     "e2e:functional": "node scripts/run-e2e.js --skip-perf --skip-security",
-    "e2e:ci": "node scripts/run-e2e.js --headless --skip-git"
+    "e2e:ci": "node scripts/run-e2e.js --headless --skip-git",
+    "heal:classify": "node scripts/classify-changes.js",
+    "heal:visual": "node scripts/visual-diff.js --all",
+    "heal:dom": "node scripts/dom-inspector.js --all",
+    "heal:api": "node scripts/api-schema-diff.js",
+    "heal:smart": "node scripts/smart-healer.js",
+    "heal:full": "npm run heal:classify && npm run heal:visual && npm run heal:dom && npm run heal:api && npm run heal:smart",
+    "heal:dry-run": "node scripts/smart-healer.js --dry-run --skip-zephyr",
+    "heal:update-baseline": "node scripts/visual-diff.js --update-baseline --all"
   },
   "dependencies": {
     "axios": "^1.6.0",
     "dotenv": "^16.0.0",
     "express": "^4.18.2",
     "form-data": "^4.0.5",
+    "pixelmatch": "^7.1.0",
+    "pngjs": "^7.0.0",
     "winston": "^3.10.0"
   },
   "devDependencies": {

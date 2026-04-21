@@ -1,6 +1,6 @@
 // storyKey: SCRUM-5
-// testType: load
-// generated: 2026-04-21T04:43:34.949Z
+// testType: scalability
+// generated: 2026-04-21T04:43:34.960Z
 // thresholds: p95=2000ms p99=5000ms errorRate=0.01
 
 import http from 'k6/http';
@@ -14,7 +14,11 @@ export const options = {
   stages: [
             {
                   "duration": "2m",
-                  "target": 25
+                  "target": 3
+            },
+            {
+                  "duration": "2m",
+                  "target": 13
             },
             {
                   "duration": "5m",

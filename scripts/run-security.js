@@ -91,18 +91,18 @@ async function main() {
   stageLog(3, 'Run ZAP + custom security scans', 'RUNNING');
   const s3 = Date.now();
 
-  // Load scan config
-  const configPath = path.join(ROOT, 'tests', 'security', `${storyKey}-scan-config.json`);
-  let zapConfig    = null;
-  let checkNames   = ALL_CHECKS;
-
-  // Re-derive check names from the registry via a simple approach
+  // All supported custom check names (must be defined before first use)
   const ALL_CHECKS = [
     'missing-security-headers', 'insecure-cookie-flags', 'session-fixation',
     'open-redirect', 'sensitive-data-in-response', 'csrf-token-absence',
     'idor-employee-id', 'sql-injection-signal', 'xss-reflection-signal',
     'broken-auth-brute-force',
   ];
+
+  // Load scan config
+  const configPath = path.join(ROOT, 'tests', 'security', `${storyKey}-scan-config.json`);
+  let zapConfig    = null;
+  let checkNames   = ALL_CHECKS;
 
   if (fs.existsSync(configPath)) {
     try {

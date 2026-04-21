@@ -285,8 +285,8 @@ async function main() {
   // ══════════════════════════════════════════════════════════════════════════
   // Stage 5a — Sync functional results to Zephyr/Jira
   // ══════════════════════════════════════════════════════════════════════════
-  stageLog('5a', 'Sync functional results to Zephyr/Jira', (flags.skipFunctional || flags.skipBugs) ? 'SKIPPED' : 'RUNNING');
-  // (handled inside qa-run.js above)
+  stageLog('5a', 'Sync functional results to Zephyr/Jira',
+    (flags.skipFunctional || flags.skipBugs) ? 'SKIPPED' : 'DONE (synced inside qa-run.js above)');
 
   // ══════════════════════════════════════════════════════════════════════════
   // Stage 5b — Sync perf results to Zephyr/Jira

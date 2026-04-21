@@ -1,0 +1,364 @@
+# smart-proactive-heal.yml
+# Fires on every push and PR. Classifies changes, diffs visuals + DOM + API,
+# heals specs and Zephyr, verifies with Playwright, reports results.
+
+name: Smart proactive heal
+
+on:
+  pull_request:
+    branches: ['**']
+    types: [opened, synchronize, reopened]
+  push:
+    branches: ['**']
+    paths-ignore:
+      - 'tests/healed/**'
+      - 'heal-artifacts/**'
+      - 'custom-report/**'
+      - 'allure-report/**'
+      - 'allure-results/**'
+      - 'playwright-report/**'
+      - '**/*.bak'
+
+concurrency:
+  group: smart-heal-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '20'
+  PW_HEADLESS:  'true'
+  PW_WORKERS:   '1'
+
+jobs:
+
+  # ── Job 1: Classify ──────────────────────────────────────────────────────────
+  classify:
+    name: Classify changes
+    runs-on: ubuntu-latest
+    outputs:
+      has_frontend:   ${{ steps.out.outputs.has_frontend }}
+      has_backend:    ${{ steps.out.outputs.has_backend }}
+      has_config:     ${{ steps.out.outputs.has_config }}
+      affected_pages: ${{ steps.out.outputs.affected_pages }}
+      issue_key:      ${{ steps.out.outputs.issue_key }}
+      any_changes:    ${{ steps.out.outputs.any_changes }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ env.NODE_VERSION }}', cache: npm }
+      - run: npm ci --prefer-offline
+
+      - name: Resolve scope
+        env:
+          GITHUB_HEAD_REF: ${{ github.head_ref }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+          GITHUB_SHA:      ${{ github.sha }}
+          ISSUE_KEY:       ${{ secrets.ISSUE_KEY }}
+        run: node scripts/resolve-scope.js || true
+
+      - name: Classify
+        id: out
+        env:
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+          ISSUE_KEY:       ${{ secrets.ISSUE_KEY }}
+        run: |
+          node scripts/classify-changes.js
+          HF=$(cat heal-artifacts/change-manifest.json | jq -r '.changeTypes.hasFrontend')
+          HB=$(cat heal-artifacts/change-manifest.json | jq -r '.changeTypes.hasBackend')
+          HC=$(cat heal-artifacts/change-manifest.json | jq -r '.changeTypes.hasConfig')
+          AP=$(cat heal-artifacts/change-manifest.json | jq -r '.affectedPages | join(",")')
+          IK=$(cat heal-artifacts/change-manifest.json | jq -r '.issueKey // ""')
+          ANY=$([ "$HF" = "true" ] || [ "$HB" = "true" ] || [ "$HC" = "true" ] && echo "true" || echo "false")
+          echo "has_frontend=$HF"   >> $GITHUB_OUTPUT
+          echo "has_backend=$HB"    >> $GITHUB_OUTPUT
+          echo "has_config=$HC"     >> $GITHUB_OUTPUT
+          echo "affected_pages=$AP" >> $GITHUB_OUTPUT
+          echo "issue_key=$IK"      >> $GITHUB_OUTPUT
+          echo "any_changes=$ANY"   >> $GITHUB_OUTPUT
+          echo "### Change classification" >> $GITHUB_STEP_SUMMARY
+          echo "| Type | Detected |" >> $GITHUB_STEP_SUMMARY && echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Frontend | $HF |" >> $GITHUB_STEP_SUMMARY
+          echo "| Backend  | $HB |" >> $GITHUB_STEP_SUMMARY
+          echo "| Config   | $HC |" >> $GITHUB_STEP_SUMMARY
+          echo "| Pages    | $AP |" >> $GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: heal-manifest
+          path: |
+            scope.json
+            heal-artifacts/change-manifest.json
+          retention-days: 1
+
+  # ── Job 2: Diff ──────────────────────────────────────────────────────────────
+  diff:
+    name: Diff — visual + DOM + API
+    runs-on: ubuntu-latest
+    needs: classify
+    if: needs.classify.outputs.any_changes == 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ env.NODE_VERSION }}', cache: npm }
+      - run: npm ci --prefer-offline
+      - run: npx playwright install --with-deps chromium
+
+      - uses: actions/download-artifact@v4
+        with: { name: heal-manifest }
+
+      - name: Restore visual baselines
+        uses: actions/cache@v4
+        with:
+          path: heal-artifacts/baselines
+          key: visual-baselines-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            visual-baselines-${{ github.ref_name }}-
+            visual-baselines-main-
+
+      - name: Restore API baselines
+        uses: actions/cache@v4
+        with:
+          path: heal-artifacts/api-baselines
+          key: api-baselines-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            api-baselines-${{ github.ref_name }}-
+            api-baselines-main-
+
+      - name: Visual diff
+        if: needs.classify.outputs.has_frontend == 'true'
+        env:
+          BASE_URL:     ${{ secrets.AUT_BASE_URL || 'https://opensource-demo.orangehrmlive.com' }}
+          AUT_USERNAME: ${{ secrets.AUT_USERNAME || 'Admin' }}
+          AUT_PASSWORD: ${{ secrets.AUT_PASSWORD || 'admin123' }}
+        run: node scripts/visual-diff.js --pages="${{ needs.classify.outputs.affected_pages }}" || true
+
+      - name: DOM locator diff
+        if: needs.classify.outputs.has_frontend == 'true'
+        env:
+          BASE_URL:     ${{ secrets.AUT_BASE_URL || 'https://opensource-demo.orangehrmlive.com' }}
+          AUT_USERNAME: ${{ secrets.AUT_USERNAME || 'Admin' }}
+          AUT_PASSWORD: ${{ secrets.AUT_PASSWORD || 'admin123' }}
+        run: node scripts/dom-inspector.js --pages="${{ needs.classify.outputs.affected_pages }}" || true
+
+      - name: API schema diff
+        if: needs.classify.outputs.has_backend == 'true'
+        env:
+          BASE_URL:     ${{ secrets.AUT_BASE_URL || 'https://opensource-demo.orangehrmlive.com' }}
+          AUT_USERNAME: ${{ secrets.AUT_USERNAME || 'Admin' }}
+          AUT_PASSWORD: ${{ secrets.AUT_PASSWORD || 'admin123' }}
+        run: node scripts/api-schema-diff.js || true
+
+      - name: Save visual baselines
+        if: always()
+        uses: actions/cache@v4
+        with:
+          path: heal-artifacts/baselines
+          key: visual-baselines-${{ github.ref_name }}-${{ github.sha }}
+
+      - name: Save API baselines
+        if: always()
+        uses: actions/cache@v4
+        with:
+          path: heal-artifacts/api-baselines
+          key: api-baselines-${{ github.ref_name }}-${{ github.sha }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: heal-diffs
+          path: heal-artifacts/
+          retention-days: 3
+
+  # ── Job 3: Heal ──────────────────────────────────────────────────────────────
+  heal:
+    name: Apply healing patches
+    runs-on: ubuntu-latest
+    needs: [classify, diff]
+    outputs:
+      yaml_changes:   ${{ steps.heal.outputs.yaml_changes }}
+      spec_changes:   ${{ steps.heal.outputs.spec_changes }}
+      zephyr_changes: ${{ steps.heal.outputs.zephyr_changes }}
+      manual_needed:  ${{ steps.heal.outputs.manual_needed }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0, token: '${{ secrets.GH_PAT || github.token }}' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ env.NODE_VERSION }}', cache: npm }
+      - run: npm ci --prefer-offline
+
+      - uses: actions/download-artifact@v4
+        with: { name: heal-diffs, path: heal-artifacts/ }
+
+      - name: Run smart healer
+        id: heal
+        env:
+          ZEPHYR_BASE_URL:   ${{ secrets.ZEPHYR_BASE_URL }}
+          ZEPHYR_ACCESS_KEY: ${{ secrets.ZEPHYR_ACCESS_KEY }}
+          PROJECT_KEY:       ${{ secrets.PROJECT_KEY || 'SCRUM' }}
+        run: |
+          node scripts/smart-healer.js || true
+          YAML_N=$(jq '.summary.yamlChanges'  heal-artifacts/smart-healing-report.json 2>/dev/null || echo 0)
+          SPEC_N=$(jq '.summary.specChanges'  heal-artifacts/smart-healing-report.json 2>/dev/null || echo 0)
+          ZEP_N=$(jq  '.summary.zephyrChanges' heal-artifacts/smart-healing-report.json 2>/dev/null || echo 0)
+          MAN_N=$(jq  '.summary.manualReview' heal-artifacts/smart-healing-report.json 2>/dev/null || echo 0)
+          echo "yaml_changes=$YAML_N"  >> $GITHUB_OUTPUT
+          echo "spec_changes=$SPEC_N"  >> $GITHUB_OUTPUT
+          echo "zephyr_changes=$ZEP_N" >> $GITHUB_OUTPUT
+          echo "manual_needed=$MAN_N"  >> $GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: heal-patches
+          path: |
+            heal-artifacts/smart-healing-report.json
+            tests/pages/
+            tests/healed/
+          retention-days: 7
+
+  # ── Job 4: Verify + Report ───────────────────────────────────────────────────
+  verify:
+    name: Verify healed specs + report
+    runs-on: ubuntu-latest
+    needs: [classify, heal]
+
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0, token: '${{ secrets.GH_PAT || github.token }}' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ env.NODE_VERSION }}', cache: npm }
+      - run: npm ci --prefer-offline
+      - run: npx playwright install --with-deps chromium
+
+      - uses: actions/download-artifact@v4
+        with: { name: heal-patches }
+
+      - name: Run healed specs
+        id: verify
+        env:
+          JIRA_URL:          ${{ secrets.JIRA_URL }}
+          JIRA_EMAIL:        ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN:    ${{ secrets.JIRA_API_TOKEN }}
+          PROJECT_KEY:       ${{ secrets.PROJECT_KEY }}
+          ISSUE_KEY:         ${{ needs.classify.outputs.issue_key || secrets.ISSUE_KEY }}
+          ZEPHYR_BASE_URL:   ${{ secrets.ZEPHYR_BASE_URL }}
+          ZEPHYR_ACCESS_KEY: ${{ secrets.ZEPHYR_ACCESS_KEY }}
+        run: |
+          if ls tests/healed/*.spec.js 2>/dev/null | head -1; then
+            npx playwright test tests/healed/ --reporter=json,list 2>&1 | tee verify-out.txt || true
+          else
+            GREP="${{ needs.classify.outputs.issue_key }}"
+            [ -z "$GREP" ] && GREP=".*"
+            npx playwright test --grep "$GREP" --reporter=json,list 2>&1 | tee verify-out.txt || true
+          fi
+          node scripts/run-and-sync.js --skip-run 2>/dev/null || true
+          node -e "
+            const fs=require('fs');
+            const src=['test-results.json'].find(f=>fs.existsSync(f));
+            if(!src){process.stdout.write('passed=0\nfailed=0\ntotal=0\nstatus=unknown\n');process.exit(0);}
+            const r=JSON.parse(fs.readFileSync(src,'utf8'));
+            let p=0,f=0;
+            function w(s){(s.specs||[]).forEach(sp=>sp.tests.forEach(t=>{const st=t.results[0]?.status;if(st==='passed')p++;else if(st==='failed'||st==='timedOut')f++;}));(s.suites||[]).forEach(w);}
+            (r.suites||[]).forEach(w);
+            process.stdout.write('passed='+p+'\nfailed='+f+'\ntotal='+(p+f)+'\nstatus='+(f===0?'passed':'failed')+'\n');
+          " >> $GITHUB_OUTPUT
+
+      - name: Create Jira bugs for remaining failures
+        if: steps.verify.outputs.status == 'failed'
+        env:
+          JIRA_URL:       ${{ secrets.JIRA_URL }}
+          JIRA_EMAIL:     ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          ISSUE_KEY:      ${{ needs.classify.outputs.issue_key || secrets.ISSUE_KEY }}
+        run: node scripts/create-jira-bugs.js || true
+
+      - name: Generate reports
+        if: always()
+        run: |
+          node scripts/generate-report.js        || true
+          node scripts/generate-allure-report.js || true
+
+      - name: Commit and push healed files
+        if: always() && github.event_name == 'push'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add tests/pages/*.yml tests/specs/*.spec.js heal-artifacts/ || true
+          git diff --staged --quiet || git commit -m \
+            "heal(smart): auto-patch selectors/assertions/testData [skip ci]"
+          git push origin HEAD || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: heal-verify-reports
+          path: |
+            custom-report/
+            allure-report/
+            heal-artifacts/smart-healing-report.json
+          retention-days: 14
+
+      - name: Post PR comment
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        env:
+          HAS_FE:         ${{ needs.classify.outputs.has_frontend }}
+          HAS_BE:         ${{ needs.classify.outputs.has_backend }}
+          HAS_CF:         ${{ needs.classify.outputs.has_config }}
+          PAGES:          ${{ needs.classify.outputs.affected_pages }}
+          YAML_CHANGES:   ${{ needs.heal.outputs.yaml_changes }}
+          SPEC_CHANGES:   ${{ needs.heal.outputs.spec_changes }}
+          ZEPHYR_CHANGES: ${{ needs.heal.outputs.zephyr_changes }}
+          MANUAL_NEEDED:  ${{ needs.heal.outputs.manual_needed }}
+          PASSED:         ${{ steps.verify.outputs.passed }}
+          FAILED:         ${{ steps.verify.outputs.failed }}
+          TOTAL:          ${{ steps.verify.outputs.total }}
+          STATUS:         ${{ steps.verify.outputs.status }}
+        with:
+          script: |
+            const fe=process.env.HAS_FE==='true', be=process.env.HAS_BE==='true', cf=process.env.HAS_CF==='true';
+            const yaml=parseInt(process.env.YAML_CHANGES||'0'), spec=parseInt(process.env.SPEC_CHANGES||'0');
+            const zep=parseInt(process.env.ZEPHYR_CHANGES||'0'), man=parseInt(process.env.MANUAL_NEEDED||'0');
+            const pass=parseInt(process.env.PASSED||'0'), fail=parseInt(process.env.FAILED||'0'), total=parseInt(process.env.TOTAL||'0');
+            const status=process.env.STATUS, pages=process.env.PAGES||'—';
+            const runUrl=`${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const icon=status==='passed'?'🩹':'❌';
+            const types=[fe&&'Frontend',be&&'Backend',cf&&'Config'].filter(Boolean).join(' + ')||'none';
+            const rows=[fe?`| Frontend | DOM + visual diff | YAML: ${yaml}, Specs: ${spec} |`:null,be?`| Backend  | API schema diff   | Specs flagged |`:null,cf?`| Config   | Constraint diff   | testData flagged |`:null].filter(Boolean).join('\n');
+            const body=[`## ${icon} Smart proactive heal — ${status==='passed'?'all clear':'failures remain'}`,``,`**Change types:** ${types}  **Pages:** ${pages}`,``,`| Strategy | Technique | Changes |`,`|----------|-----------|---------|`,rows||'| — | No changes | — |',``,`**Zephyr steps updated:** ${zep}  **Verification:** ${pass}/${total} passed`,man>0?`\n> **${man} item(s)** need manual review — check \`heal-artifacts/smart-healing-report.json\``:'',``,fail>0?`> Jira bugs auto-created for ${fail} spec(s) still failing after healing.`:`> All healed specs pass. Patched files committed to branch.`,``,`[View full reports](${runUrl})`,`<sub>Run #${context.runId} · ${new Date().toUTCString()}</sub>`].join('\n');
+            const {data:comments}=await github.rest.issues.listComments({owner:context.repo.owner,repo:context.repo.repo,issue_number:context.issue.number});
+            const existing=comments.find(c=>c.user.type==='Bot'&&c.body.includes('Smart proactive heal'));
+            if(existing){await github.rest.issues.updateComment({owner:context.repo.owner,repo:context.repo.repo,comment_id:existing.id,body});}
+            else{await github.rest.issues.createComment({owner:context.repo.owner,repo:context.repo.repo,issue_number:context.issue.number,body});}
+
+      - name: Slack notification
+        if: always() && env.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          STATUS: ${{ steps.verify.outputs.status }}
+          PASSED: ${{ steps.verify.outputs.passed }}
+          TOTAL:  ${{ steps.verify.outputs.total }}
+          PAGES:  ${{ needs.classify.outputs.affected_pages }}
+          YAML_N: ${{ needs.heal.outputs.yaml_changes }}
+          SPEC_N: ${{ needs.heal.outputs.spec_changes }}
+          ACTOR:  ${{ github.actor }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          ICON=$( [ "$STATUS" = "passed" ] && echo ":adhesive_bandage:" || echo ":x:" )
+          COLOR=$( [ "$STATUS" = "passed" ] && echo "good" || echo "danger" )
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          curl -s -X POST "$SLACK_WEBHOOK_URL" -H "Content-Type: application/json" -d "{
+            \"attachments\":[{\"color\":\"$COLOR\",\"blocks\":[
+              {\"type\":\"header\",\"text\":{\"type\":\"plain_text\",\"text\":\"$ICON Smart heal — $STATUS\"}},
+              {\"type\":\"section\",\"fields\":[
+                {\"type\":\"mrkdwn\",\"text\":\"*Pages:*\n$PAGES\"},
+                {\"type\":\"mrkdwn\",\"text\":\"*Branch:*\n\`$BRANCH\`\"},
+                {\"type\":\"mrkdwn\",\"text\":\"*Healed:*\nYAML $YAML_N  Specs $SPEC_N\"},
+                {\"type\":\"mrkdwn\",\"text\":\"*Verify:*\n$PASSED / $TOTAL passed\"}
+              ]},
+              {\"type\":\"actions\",\"elements\":[{\"type\":\"button\",\"text\":{\"type\":\"plain_text\",\"text\":\"View run\"},\"url\":\"$RUN_URL\"}]}
+            ]}]
+          }"

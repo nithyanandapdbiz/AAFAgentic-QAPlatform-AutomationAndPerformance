@@ -1,6 +1,6 @@
 // storyKey: SCRUM-5
-// testType: load
-// generated: 2026-04-21T04:43:34.949Z
+// testType: spike
+// generated: 2026-04-21T04:43:34.954Z
 // thresholds: p95=2000ms p99=5000ms errorRate=0.01
 
 import http from 'k6/http';
@@ -13,15 +13,15 @@ const errorRate    = new Rate('error_rate');
 export const options = {
   stages: [
             {
-                  "duration": "2m",
-                  "target": 25
-            },
-            {
-                  "duration": "5m",
-                  "target": 25
+                  "duration": "10s",
+                  "target": 75
             },
             {
                   "duration": "1m",
+                  "target": 75
+            },
+            {
+                  "duration": "10s",
                   "target": 0
             }
       ],

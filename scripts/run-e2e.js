@@ -36,7 +36,8 @@
  *   node scripts/run-e2e.js --skip-security        ← skip security pillar
  *   node scripts/run-e2e.js --no-zap               ← custom checks only (no ZAP)
  *   node scripts/run-e2e.js --skip-story           ← skip story analysis (TCs exist)
- *   node scripts/run-e2e.js --skip-heal            ← skip self-healer
+ *   node scripts/run-e2e.js --skip-heal            ← skip reactive self-healer
+ *   node scripts/run-e2e.js --skip-smart-heal       ← skip proactive smart-healer
  *   node scripts/run-e2e.js --skip-bugs            ← skip Jira bug creation
  *   node scripts/run-e2e.js --skip-git             ← skip git auto-commit + push
  *   node scripts/run-e2e.js --force                ← recreate Zephyr TCs
@@ -62,6 +63,7 @@ const skipPerf       = flags.has('--skip-perf');
 const skipSecurity   = flags.has('--skip-security');
 const noZap          = flags.has('--no-zap');
 const skipHeal       = flags.has('--skip-heal');
+const skipSmartHeal  = flags.has('--skip-smart-heal');
 const skipBugs       = flags.has('--skip-bugs');
 const skipGit        = flags.has('--skip-git');
 
@@ -88,6 +90,7 @@ function banner() {
   console.log(row(''));
   console.log(row('  Phase A: Prepare  →  Phase B: Execute  →  Phase C: Report', C.dim));
   console.log(row(`  Pillars: Functional  +  ${skipPerf ? C.dim + '(Perf skipped)' : C.cyan + 'Performance'}${C.reset}${C.bold}${C.purple}  +  ${skipSecurity ? C.dim + '(Security skipped)' : C.orange + 'Security'}`, ''));
+  console.log(row(`  Healing: Proactive (smart-healer)  +  Reactive (healer)${skipSmartHeal ? C.dim + '  [--skip-smart-heal]' : ''}`, C.dim));
   console.log(row(''));
   console.log(row(`  Story  : ${process.env.ISSUE_KEY || '(set ISSUE_KEY in .env)'}`, C.white));
   console.log(row(`  Mode   : ${useHeadless ? 'Headless (CI)' : 'Headed — visible browser'}`, C.white));
@@ -176,6 +179,15 @@ const STAGES = [
     skip: () => skipSecurity,
     skipMsg: 'Security config generation skipped  (--skip-security)',
     softFail: true,
+  },
+  {
+    num: '5b', label: 'Smart Proactive Healing — patch selectors from git diff',
+    phase: 'A',
+    script: 'scripts/smart-healer.js',
+    skip: () => skipSmartHeal,
+    skipMsg: 'Smart proactive healing skipped  (--skip-smart-heal)',
+    softFail: true,
+    extraArgs: () => ['--skip-zephyr'],
   },
 
   // ── PHASE B: EXECUTE ───────────────────────────────────────────────────────

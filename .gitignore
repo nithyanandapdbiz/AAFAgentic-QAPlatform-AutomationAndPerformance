@@ -34,3 +34,9 @@ Thumbs.db
 # ── Editor ────────────────────────────────────────────────────────────────
 .vscode/
 *.log
+
+# ── Smart Proactive Healing ────────────────────────────────────────────────────
+heal-artifacts/baselines/
+heal-artifacts/api-baselines/
+heal-artifacts/visual-diff/
+*.bak

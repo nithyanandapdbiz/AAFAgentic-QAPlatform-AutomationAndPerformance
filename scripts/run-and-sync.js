@@ -264,9 +264,14 @@ async function updateExecution(execId, statusName, comment = '') {
 // Mark a test case as Automated in Zephyr (called only after TC has been executed by Playwright)
 async function markAsAutomated(tcKey) {
   try {
+    // GET existing TC so we can do a full-body PUT (Zephyr requires all fields)
+    const existing = await axios.get(
+      `${ZEPHYR_BASE}/testcases/${tcKey}`,
+      { headers: zHeaders() }
+    );
     await axios.put(
       `${ZEPHYR_BASE}/testcases/${tcKey}`,
-      { projectKey: PROJECT_KEY, automationStatus: 'Automated' },
+      { ...existing.data, projectKey: PROJECT_KEY, automationStatus: 'Automated' },
       { headers: zHeaders() }
     );
     return true;
@@ -304,25 +309,35 @@ async function main() {
   console.log('  Step 1 — Run Playwright Tests');
   console.log('──────────────────────────────────────────────────────\n');
 
-  // Remove stale results file so we always get fresh output
-  if (fs.existsSync(RESULTS_FILE)) fs.unlinkSync(RESULTS_FILE);
-
-  console.log('  Running: npx playwright test ...\n');
   let playwrightExitCode = 0;
-  // Pass JSON output path via env var — Playwright JSON reporter honours it
-  // and playwright.config.js also sets outputFile: 'test-results.json'
-  try {
-    execSync('npx playwright test', {
-      cwd:   ROOT,
-      stdio: 'inherit',
-      env:   {
-        ...process.env,
-        PLAYWRIGHT_JSON_OUTPUT_NAME: RESULTS_FILE
-      }
-    });
-  } catch (err) {
-    // Playwright exits non-zero when any test fails — that's expected
-    playwrightExitCode = err.status || 1;
+
+  if (process.env.SKIP_PLAYWRIGHT_RUN === 'true') {
+    // Caller (e.g. run-story-tests.js) already ran Playwright and wrote test-results.json.
+    // Skip the Playwright execution step and proceed directly to parse + sync.
+    console.log('  [SKIP_PLAYWRIGHT_RUN=true] Skipping Playwright execution — using existing test-results.json\n');
+  } else {
+    // Remove stale results file so we always get fresh output
+    if (fs.existsSync(RESULTS_FILE)) fs.unlinkSync(RESULTS_FILE);
+
+    console.log('  Running: npx playwright test ...\n');
+    // Pass JSON output path via env var — Playwright JSON reporter honours it
+    // and playwright.config.js also sets outputFile: 'test-results.json'
+    try {
+      // shell:true is required on Windows where 'npx' is a .cmd batch file —
+      // without it Node can't locate the binary and the process hangs silently.
+      execSync('npx playwright test', {
+        cwd:   ROOT,
+        stdio: 'inherit',
+        shell: true,
+        env:   {
+          ...process.env,
+          PLAYWRIGHT_JSON_OUTPUT_NAME: RESULTS_FILE
+        }
+      });
+    } catch (err) {
+      // Playwright exits non-zero when any test fails — that's expected
+      playwrightExitCode = err.status || 1;
+    }
   }
 
   // ── Step 2: Parse results ────────────────────────────────────────────────

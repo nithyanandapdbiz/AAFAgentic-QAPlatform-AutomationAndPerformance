@@ -1,6 +1,6 @@
 // storyKey: SCRUM-5
-// testType: load
-// generated: 2026-04-21T04:43:34.949Z
+// testType: soak
+// generated: 2026-04-21T04:43:34.957Z
 // thresholds: p95=2000ms p99=5000ms errorRate=0.01
 
 import http from 'k6/http';
@@ -17,7 +17,7 @@ export const options = {
                   "target": 25
             },
             {
-                  "duration": "5m",
+                  "duration": "30m",
                   "target": 25
             },
             {

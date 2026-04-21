@@ -193,6 +193,7 @@ function runPlaywright(specFiles, extraArgs = []) {
     execSync(cmd, {
       cwd:   ROOT,
       stdio: 'inherit',
+      shell: true,   // required on Windows — npx is a .cmd batch file
       env:   { ...process.env, PLAYWRIGHT_JSON_OUTPUT_NAME: RESULTS_FILE }
     });
   } catch (err) {

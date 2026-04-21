@@ -1,0 +1,60 @@
+{
+  "generatedAt": "2026-04-21T05:35:09.606Z",
+  "dryRun": false,
+  "strategies": {
+    "frontend": {
+      "yamlChanges": 0,
+      "specChanges": 0
+    },
+    "backend": {
+      "specChanges": 0
+    },
+    "config": {
+      "specChanges": 0
+    }
+  },
+  "zephyrChanges": [
+    {
+      "testKey": "SCRUM-T180",
+      "type": "config",
+      "constraint": "MAX",
+      "value": "50"
+    },
+    {
+      "testKey": "SCRUM-T180",
+      "type": "config",
+      "constraint": "MAX",
+      "value": "50"
+    },
+    {
+      "testKey": "SCRUM-T180",
+      "type": "config",
+      "constraint": "MAX",
+      "value": "50"
+    },
+    {
+      "testKey": "SCRUM-T184",
+      "type": "config",
+      "constraint": "MAX",
+      "value": "50"
+    },
+    {
+      "testKey": "SCRUM-T184",
+      "type": "config",
+      "constraint": "MAX",
+      "value": "50"
+    },
+    {
+      "testKey": "SCRUM-T184",
+      "type": "config",
+      "constraint": "MAX",
+      "value": "50"
+    }
+  ],
+  "summary": {
+    "yamlChanges": 0,
+    "specChanges": 0,
+    "zephyrChanges": 6,
+    "manualReview": 0
+  }
+}

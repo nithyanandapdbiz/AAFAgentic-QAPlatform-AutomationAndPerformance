@@ -58,9 +58,13 @@ function runPerfTest(scriptPath, outJsonPath, env = {}) {
     if (env.VUS)       envArgs.push('--env', `VUS=${env.VUS}`);
     if (env.DURATION)  envArgs.push('--env', `DURATION=${env.DURATION}`);
 
+    // Use a relative path for k6's --out json= argument (relative to ROOT/cwd).
+    // Absolute Windows paths with drive letters can be mis-parsed by k6 on Windows.
+    const relOutPath = path.relative(ROOT, outJsonPath).replace(/\\/g, '/');
+
     const args = [
       'run',
-      '--out', `json=${outJsonPath}`,
+      '--out', `json=${relOutPath}`,
       ...envArgs,
       scriptPath,
     ];
@@ -81,9 +85,16 @@ function runPerfTest(scriptPath, outJsonPath, env = {}) {
       throw new AppError(`k6 spawn error: ${result.error.message}`);
     }
 
-    if (exitCode !== 0) {
+    // Exit codes 0 = success, 1 = threshold breach (non-staged), 99 = threshold breach (staged).
+    // All three mean k6 ran to completion and the output file is valid.
+    const thresholdsBreach = stderr.includes('thresholds on metrics') && stderr.includes('have been crossed');
+    if (exitCode !== 0 && exitCode !== 99 && !(exitCode === 1 && thresholdsBreach)) {
       const msg = `k6 exited with code ${exitCode}. stderr: ${stderr.slice(0, 500)}`;
       if (!skipSoak) throw new AppError(msg);
+    }
+
+    if (exitCode !== 0) {
+      logger.warn(`[PerfExecution] k6 thresholds breached for ${path.basename(scriptPath)} (exit ${exitCode}) — results still available`);
     }
 
     return { skipped: false, scriptPath, outJsonPath, stdout, stderr, exitCode };

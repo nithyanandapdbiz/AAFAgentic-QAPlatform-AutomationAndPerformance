@@ -222,7 +222,8 @@ function runPlaywright(specFiles, grepPattern) {
   };
   if (grepPattern && grepPattern !== '.*') extraEnv.PW_GREP = grepPattern;
 
-  const r = spawnSync('npx.cmd', pwArgs, {
+  const NPX = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+  const r = spawnSync(NPX, pwArgs, {
     cwd:   ROOT,
     stdio: 'inherit',
     shell: true,   // npx requires shell on Windows; PW_GREP env var carries the

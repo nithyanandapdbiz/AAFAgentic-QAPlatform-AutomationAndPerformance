@@ -25,7 +25,8 @@
  *   node scripts/run-full-pipeline.js --include-security   ← also run ZAP + custom security scans
  *   node scripts/run-full-pipeline.js --headless         ← CI / headless mode
  *   node scripts/run-full-pipeline.js --force            ← recreate Zephyr TCs
- *   node scripts/run-full-pipeline.js --skip-heal        ← skip self-healer
+ *   node scripts/run-full-pipeline.js --skip-heal        ← skip reactive self-healer
+ *   node scripts/run-full-pipeline.js --skip-smart-heal   ← skip proactive smart-healer
  *   node scripts/run-full-pipeline.js --skip-bugs        ← skip Jira bug creation
  *   node scripts/run-full-pipeline.js --skip-git         ← skip git auto-commit + push
  *   ISSUE_KEY=SCRUM-6 node scripts/run-full-pipeline.js  ← override story key
@@ -121,6 +122,15 @@ const STAGES = [
     script: 'scripts/generate-playwright.js',
     skip: () => false,
     softFail: false
+  },
+  {
+    num: '2b', label: 'Smart Proactive Healing — patch selectors from git diff',
+    desc: 'Classifies git-diff changes, resolves affected POM pages, patches selectors proactively before test run',
+    script: 'scripts/smart-healer.js',
+    skip: () => flags.has('--skip-smart-heal'),
+    skipMsg: 'Smart proactive healing skipped  (--skip-smart-heal)',
+    softFail: true,
+    extraEnv: () => ({})
   },
   {
     num: 3, label: `Execute tests [${useHeadless ? 'HEADLESS' : 'HEADED/UI'}] → sync Zephyr`,
