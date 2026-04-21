@@ -1,6 +1,6 @@
 // storyKey: SCRUM-5
 // testType: breakpoint
-// generated: 2026-04-21T11:35:17.886Z
+// generated: 2026-04-21T12:54:08.558Z
 // WARNING: Journey could not be inferred — manual customisation required.
 
 import http from 'k6/http';
