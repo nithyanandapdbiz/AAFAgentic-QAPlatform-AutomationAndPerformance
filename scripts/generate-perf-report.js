@@ -9,7 +9,95 @@ const AppError = require('../src/core/errorHandler');
 
 const ROOT = path.resolve(__dirname, '..');
 
-// â”€â”€â”€ Normalise a result entry regardless of flat vs metrics-nested format â”€â”€â”€â”€
+// ─── Build time-bucketed series from a k6 NDJSON output file ─────────────────
+// Returns { labels, p50, p95, p99, rps, errorRate, vus } arrays aligned by bucket.
+// Bucket size defaults to 5 seconds; caller can override. Returns null on failure.
+function buildTimeSeries(ndjsonPath, bucketSec = 5) {
+  try {
+    if (!fs.existsSync(ndjsonPath)) return null;
+    const stat = fs.statSync(ndjsonPath);
+    if (stat.size === 0) return null;
+    const raw = fs.readFileSync(ndjsonPath, 'utf8');
+    const buckets = new Map(); // key = epoch seconds (floored to bucket)
+    let firstTs = null;
+    for (const line of raw.split('\n')) {
+      if (!line || line[0] !== '{') continue;
+      let obj;
+      try { obj = JSON.parse(line); } catch { continue; }
+      if (obj.type !== 'Point' || !obj.data || !obj.data.time) continue;
+      const metric = obj.metric;
+      if (!['http_req_duration', 'http_reqs', 'http_req_failed', 'vus'].includes(metric)) continue;
+      const ts = Date.parse(obj.data.time);
+      if (Number.isNaN(ts)) continue;
+      if (firstTs === null || ts < firstTs) firstTs = ts;
+      const bucketKey = Math.floor(ts / (bucketSec * 1000)) * bucketSec;
+      let b = buckets.get(bucketKey);
+      if (!b) { b = { durations: [], reqs: 0, fails: 0, vus: 0, vusCount: 0 }; buckets.set(bucketKey, b); }
+      const v = obj.data.value;
+      if (metric === 'http_req_duration') b.durations.push(v);
+      else if (metric === 'http_reqs')    b.reqs += (v || 0);
+      else if (metric === 'http_req_failed') { b.fails += (v || 0); }
+      else if (metric === 'vus')          { b.vus += (v || 0); b.vusCount++; }
+    }
+    if (buckets.size === 0) return null;
+    const pct = (arr, p) => {
+      if (!arr.length) return 0;
+      const s = [...arr].sort((a, b) => a - b);
+      return s[Math.max(0, Math.ceil((p / 100) * s.length) - 1)];
+    };
+    const sorted = [...buckets.entries()].sort((a, b) => a[0] - b[0]);
+    const firstKey = sorted[0][0];
+    const labels = [], p50 = [], p95 = [], p99 = [], rps = [], errorRate = [], vus = [];
+    for (const [key, b] of sorted) {
+      labels.push(String(key - firstKey) + 's');
+      p50.push(Math.round(pct(b.durations, 50)));
+      p95.push(Math.round(pct(b.durations, 95)));
+      p99.push(Math.round(pct(b.durations, 99)));
+      rps.push(+(b.reqs / bucketSec).toFixed(2));
+      const total = b.durations.length || 1;
+      errorRate.push(+((b.fails / total) * 100).toFixed(2));
+      vus.push(b.vusCount ? Math.round(b.vus / b.vusCount) : 0);
+    }
+    return { labels, p50, p95, p99, rps, errorRate, vus, bucketSec };
+  } catch {
+    return null;
+  }
+}
+
+// ─── Auto-generate insights from results ─────────────────────────────────────
+function buildInsights(rows, thresholds) {
+  const insights = [];
+  if (!rows.length) return insights;
+  const worstP99 = rows.reduce((a, r) => r.p99 > a.p99 ? r : a, rows[0]);
+  if (worstP99.p99 > 0 && thresholds.p99 > 0) {
+    const pct = Math.round((worstP99.p99 / thresholds.p99) * 100);
+    if (pct >= 90) {
+      insights.push({ level: pct >= 100 ? 'fail' : 'warn',
+        text: `<strong>${worstP99.name}</strong> p99 at ${Math.round(worstP99.p99)}ms is ${pct}% of SLA (${thresholds.p99}ms).` });
+    }
+  }
+  const highErr = rows.filter(r => r.errorRate > thresholds.errorRate);
+  if (highErr.length) {
+    insights.push({ level: 'fail',
+      text: `${highErr.length} script(s) exceeded error-rate SLA (${(thresholds.errorRate * 100).toFixed(2)}%): ${highErr.map(r => r.name).join(', ')}.` });
+  }
+  const degraded = rows.filter(r => r.baselineDegraded);
+  if (degraded.length) {
+    insights.push({ level: 'warn',
+      text: `${degraded.length} script(s) show baseline regression vs previous run.` });
+  }
+  const slowNet = rows.filter(r => r.waiting > 500);
+  if (slowNet.length) {
+    insights.push({ level: 'warn',
+      text: `High server wait time (TTFB > 500ms) detected on ${slowNet.length} script(s) — investigate backend latency.` });
+  }
+  if (insights.length === 0) {
+    insights.push({ level: 'pass', text: 'All scripts within SLA, no baseline regression, no near-threshold warnings.' });
+  }
+  return insights;
+}
+
+// ─── Normalise a result entry regardless of flat vs metrics-nested format ────
 function norm(r) {
   const m = r.metrics || {};
   return {
@@ -18,6 +106,8 @@ function norm(r) {
     verdict:          r.verdict       || 'pass',
     p95:              +(m.p95          ?? r.p95          ?? 0),
     p99:              +(m.p99          ?? r.p99          ?? 0),
+    p50:              +(m.p50          ?? r.p50          ?? 0),
+    p90:              +(m.p90          ?? r.p90          ?? 0),
     avg:              +(m.avg          ?? r.avg          ?? 0),
     max:              +(m.max          ?? r.max          ?? 0),
     errorRate:        +(m.errorRate    ?? r.errorRate    ?? 0),
@@ -49,6 +139,8 @@ function norm(r) {
     trend:           r.trend         || null,
     historyWindow:   r.historyWindow || [],
     droppedIterations: +(m.droppedIterations ?? r.droppedIterations ?? 0),
+    // Time-bucketed series built from NDJSON by buildTimeSeries (optional)
+    timeseries:      r.timeseries    || null,
   };
 }
 
@@ -195,8 +287,22 @@ function generatePerfReport(results, thresholds, outputDir) {
     const chartLabels   = JSON.stringify(rows.map(r => r.name));
     const p95Data       = JSON.stringify(rows.map(r => Math.round(r.p95)));
     const p99Data       = JSON.stringify(rows.map(r => Math.round(r.p99)));
-    const errData       = JSON.stringify(rows.map(r => parseFloat((r.errorRate * 100).toFixed(3))));
-    const errColors     = JSON.stringify(rows.map(r =>
+    const p50Data       = JSON.stringify(rows.map(r => Math.round(r.p50)));
+    const p90Data       = JSON.stringify(rows.map(r => Math.round(r.p90)));
+    const avgData       = JSON.stringify(rows.map(r => Math.round(r.avg)));
+    const throughputData= JSON.stringify(rows.map(r => +r.throughput.toFixed(2)));
+    // Network breakdown stacked-bar datasets (avg ms per phase per script)
+    const netBlocked    = JSON.stringify(rows.map(r => +r.blocked.toFixed(1)));
+    const netConnecting = JSON.stringify(rows.map(r => +r.connecting.toFixed(1)));
+    const netTls        = JSON.stringify(rows.map(r => +r.tlsHandshake.toFixed(1)));
+    const netSending    = JSON.stringify(rows.map(r => +r.sending.toFixed(1)));
+    const netWaiting    = JSON.stringify(rows.map(r => +r.waiting.toFixed(1)));
+    const netReceiving  = JSON.stringify(rows.map(r => +r.receiving.toFixed(1)));
+    // Time-series (NDJSON-derived) for throughput & latency trend charts
+    const timeSeriesData = JSON.stringify(rows.map(r => ({
+      name: r.name, testType: r.testType, ts: r.timeseries || null,
+    })));
+    const errData       = JSON.stringify(rows.map(r => parseFloat((r.errorRate * 100).toFixed(3))));    const errColors     = JSON.stringify(rows.map(r =>
       r.errorRate > th.errorRate ? '#b71c1c' : r.errorRate > th.errorRate * 0.9 ? '#e65100' : '#2e7d32'
     ));
     const p95Threshold  = th.p95;
@@ -386,6 +492,42 @@ function generatePerfReport(results, thresholds, outputDir) {
       yAxisID: 'yVUs', tension: 0.3, fill: false,
     }));
 
+    // ── Insights (auto-generated observations) ────────────────────────────────
+    const insights = buildInsights(rows, th);
+    const insightsHtml = insights.map(i => {
+      const cls = i.level === 'fail' ? 'ins-fail' : i.level === 'warn' ? 'ins-warn' : 'ins-pass';
+      const icon = i.level === 'fail' ? '✖' : i.level === 'warn' ? '⚠' : '✔';
+      return `<li class="${cls}"><span class="ins-ico">${icon}</span>${i.text}</li>`;
+    }).join('');
+
+    // ── Per-test-type aggregates ──────────────────────────────────────────────
+    const typeAgg = testTypes.map(t => {
+      const subset = rows.filter(r => r.testType === t);
+      if (!subset.length) return null;
+      const avg = (k) => subset.reduce((s, r) => s + (r[k] || 0), 0) / subset.length;
+      const worst = subset.reduce((a, r) => r.p99 > a.p99 ? r : a, subset[0]);
+      const passN = subset.filter(r => r.verdict === 'pass').length;
+      return {
+        type: t, count: subset.length, passN,
+        avgP95: Math.round(avg('p95')), worstP99: Math.round(worst.p99),
+        avgThr: avg('throughput').toFixed(1),
+        avgErr: (avg('errorRate') * 100).toFixed(2),
+        maxVus: Math.max(...subset.map(r => r.vusMax || 0)),
+        verdict: worstVerdict(subset),
+      };
+    }).filter(Boolean);
+    const typeAggHtml = typeAgg.map(t => `
+      <div class="type-card type-${t.verdict}">
+        <div class="type-head">${typePill(t.type)} <span class="type-count">${t.passN}/${t.count} pass</span></div>
+        <div class="type-metrics">
+          <div><span>Avg p95</span><strong>${t.avgP95}ms</strong></div>
+          <div><span>Worst p99</span><strong>${t.worstP99}ms</strong></div>
+          <div><span>Throughput</span><strong>${t.avgThr}/s</strong></div>
+          <div><span>Err rate</span><strong>${t.avgErr}%</strong></div>
+          <div><span>Peak VUs</span><strong>${t.maxVus}</strong></div>
+        </div>
+      </div>`).join('');
+
     // ── Assemble HTML ──────────────────────────────────────────────────────────────
     
     const html = `<!DOCTYPE html>
@@ -452,6 +594,25 @@ function generatePerfReport(results, thresholds, outputDir) {
     .legend-dot{width:14px;height:14px;border-radius:2px;display:inline-block;margin-right:4px;vertical-align:middle}
     .chart-wrap{background:#fff;border-radius:8px;padding:20px;box-shadow:0 1px 4px rgba(0,0,0,.1);margin-bottom:24px}
 
+    /* Insights panel */
+    .insights{background:#fff;border-radius:8px;padding:16px 22px;box-shadow:0 1px 4px rgba(0,0,0,.08);margin:20px 0 28px;border-left:4px solid #1565c0}
+    .insights h3{margin:0 0 10px;font-size:1rem;color:#1565c0;letter-spacing:.3px}
+    .insights ul{list-style:none;padding:0;margin:0}
+    .insights li{padding:6px 0;font-size:0.88rem;display:flex;align-items:flex-start;gap:10px;border-bottom:1px dashed #f0f0f0}
+    .insights li:last-child{border-bottom:none}
+    .insights .ins-ico{font-weight:700;width:18px;flex:none;text-align:center}
+    .ins-fail .ins-ico{color:#c62828}.ins-warn .ins-ico{color:#e65100}.ins-pass .ins-ico{color:#2e7d32}
+
+    /* Per-test-type aggregate cards */
+    .type-agg{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin-bottom:28px}
+    .type-card{background:#fff;border-radius:8px;padding:14px 16px;box-shadow:0 1px 4px rgba(0,0,0,.08);border-top:3px solid #1565c0}
+    .type-card.type-pass{border-top-color:#2e7d32}.type-card.type-warn{border-top-color:#e65100}.type-card.type-fail{border-top-color:#c62828}
+    .type-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;font-size:0.85rem}
+    .type-count{color:#666;font-weight:500}
+    .type-metrics{display:grid;grid-template-columns:repeat(2,1fr);gap:6px 12px;font-size:0.82rem}
+    .type-metrics>div{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px dotted #eee}
+    .type-metrics span{color:#777}.type-metrics strong{color:#1565c0;font-weight:600}
+
     /* Footer */
     footer{margin-top:40px;padding-top:16px;border-top:1px solid #e0e0e0;font-size:0.78rem;color:#888;display:flex;gap:20px;flex-wrap:wrap}
     footer a{color:#1565c0;text-decoration:none}
@@ -509,9 +670,21 @@ function generatePerfReport(results, thresholds, outputDir) {
     ${slaCard('Max VUs',      maxVus,   parseInt(process.env.PERF_VUS_MAX||'50',10), '', false)}
   </div>
 
-  <!-- â”€â”€ TABS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+  <!-- ── INSIGHTS ─────────────────────────────────────────────────────────── -->
+  <div class="insights">
+    <h3>Automated Insights</h3>
+    <ul>${insightsHtml}</ul>
+  </div>
+
+  <!-- ── PER-TEST-TYPE AGGREGATES ─────────────────────────────────────────── -->
+  ${typeAgg.length > 1 ? `<h2>Per Test-Type Summary</h2><div class="type-agg">${typeAggHtml}</div>` : ''}
+
+  <!-- ── TABS ─────────────────────────────────────────────────────────────── -->
   <div class="tab-bar">
-    <button class="tab-btn active" onclick="showTab('t1',this)">Response Time Charts</button>
+    <button class="tab-btn active" onclick="showTab('t1',this)">Response Time</button>
+    <button class="tab-btn"       onclick="showTab('t6',this)">Latency Distribution</button>
+    <button class="tab-btn"       onclick="showTab('t7',this)">Throughput Timeline</button>
+    <button class="tab-btn"       onclick="showTab('t8',this)">Network Breakdown</button>
     <button class="tab-btn"       onclick="showTab('t2',this)">All Scripts Table</button>
     <button class="tab-btn"       onclick="showTab('t3',this)">Script Details</button>
     <button class="tab-btn"       onclick="showTab('t4',this)">Baseline Comparison</button>
@@ -528,6 +701,35 @@ function generatePerfReport(results, thresholds, outputDir) {
     <div class="chart-wrap"><canvas id="rtChart" height="80"></canvas></div>
     <h4>Error Rate (%) per script</h4>
     <div class="chart-wrap"><canvas id="errChart" height="60"></canvas></div>
+  </div>
+
+  <!-- TAB 6: LATENCY DISTRIBUTION (p50/p90/p95/p99 per script) -->
+  <div id="t6" class="tab-pane">
+    <div class="chart-legend">
+      <span><span class="legend-dot" style="background:#66bb6a"></span>p50</span>
+      <span><span class="legend-dot" style="background:#26a69a"></span>p90</span>
+      <span><span class="legend-dot" style="background:#1565c0"></span>p95</span>
+      <span><span class="legend-dot" style="background:#ef5350"></span>p99</span>
+      <span style="color:#555">Full percentile profile reveals tail latency spread.</span>
+    </div>
+    <div class="chart-wrap"><canvas id="distChart" height="80"></canvas></div>
+    <h4>Average Latency vs Throughput</h4>
+    <div class="chart-wrap"><canvas id="scatterChart" height="80"></canvas></div>
+  </div>
+
+  <!-- TAB 7: THROUGHPUT TIMELINE (RPS & p95 over time from NDJSON) -->
+  <div id="t7" class="tab-pane">
+    <p style="color:#555;margin-top:0">Requests-per-second and p95 latency bucketed per 5s window from the raw k6 NDJSON stream.</p>
+    <div class="chart-wrap"><canvas id="rpsChart" height="70"></canvas></div>
+    <h4>p95 Latency Over Time</h4>
+    <div class="chart-wrap"><canvas id="p95TimeChart" height="70"></canvas></div>
+    <div id="t7-empty" style="display:none;color:#888;text-align:center;padding:40px">No time-series data — re-run tests to capture raw NDJSON.</div>
+  </div>
+
+  <!-- TAB 8: NETWORK BREAKDOWN (stacked phase decomposition) -->
+  <div id="t8" class="tab-pane">
+    <p style="color:#555;margin-top:0">Average time (ms) spent in each HTTP request phase. High <strong>waiting</strong> usually indicates backend latency.</p>
+    <div class="chart-wrap"><canvas id="netChart" height="80"></canvas></div>
   </div>
 
   <!-- TAB 2: ALL SCRIPTS TABLE -->
@@ -585,6 +787,17 @@ function generatePerfReport(results, thresholds, outputDir) {
     const LABELS     = ${chartLabels};
     const P95_DATA   = ${p95Data};
     const P99_DATA   = ${p99Data};
+    const P50_DATA   = ${p50Data};
+    const P90_DATA   = ${p90Data};
+    const AVG_DATA   = ${avgData};
+    const THR_DATA   = ${throughputData};
+    const NET_BLOCKED    = ${netBlocked};
+    const NET_CONNECTING = ${netConnecting};
+    const NET_TLS        = ${netTls};
+    const NET_SENDING    = ${netSending};
+    const NET_WAITING    = ${netWaiting};
+    const NET_RECEIVING  = ${netReceiving};
+    const TS_DATA    = ${timeSeriesData};
     const ERR_DATA   = ${errData};
     const ERR_COLORS = ${errColors};
     const P95_SLA    = ${p95Threshold};
@@ -625,6 +838,108 @@ function generatePerfReport(results, thresholds, outputDir) {
         plugins: { legend: { position: 'top' } },
         scales: { y: { beginAtZero: true, title: { display: true, text: '%' } } }
       }
+    });
+
+    // ── Tab 6: Latency Distribution (p50/p90/p95/p99 grouped bars) ───────────
+    new Chart(document.getElementById('distChart'), {
+      type: 'bar',
+      data: {
+        labels: LABELS,
+        datasets: [
+          { label: 'p50', data: P50_DATA, backgroundColor: '#66bb6a' },
+          { label: 'p90', data: P90_DATA, backgroundColor: '#26a69a' },
+          { label: 'p95', data: P95_DATA, backgroundColor: '#1565c0' },
+          { label: 'p99', data: P99_DATA, backgroundColor: '#ef5350' },
+          { label: 'SLA p95', data: Array(LABELS.length).fill(P95_SLA), type: 'line', borderColor: '#1565c0', borderDash: [6,3], pointRadius: 0, fill: false },
+          { label: 'SLA p99', data: Array(LABELS.length).fill(P99_SLA), type: 'line', borderColor: '#ef5350', borderDash: [6,3], pointRadius: 0, fill: false },
+        ]
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { position: 'top' }, tooltip: { mode: 'index', intersect: false } },
+        scales: { y: { beginAtZero: true, title: { display: true, text: 'Latency (ms)' } } }
+      }
+    });
+
+    // Avg latency vs throughput scatter
+    new Chart(document.getElementById('scatterChart'), {
+      type: 'scatter',
+      data: {
+        datasets: LABELS.map((lbl, i) => ({
+          label: lbl,
+          data: [{ x: THR_DATA[i], y: AVG_DATA[i] }],
+          backgroundColor: ERR_COLORS[i] || '#1565c0',
+          pointRadius: 8, pointHoverRadius: 10,
+        })),
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { position: 'bottom' }, tooltip: { callbacks: { label: (ctx) => ctx.dataset.label + ': ' + ctx.parsed.x + ' req/s @ ' + ctx.parsed.y + 'ms' } } },
+        scales: {
+          x: { title: { display: true, text: 'Throughput (req/s)' }, beginAtZero: true },
+          y: { title: { display: true, text: 'Avg Latency (ms)' }, beginAtZero: true },
+        },
+      },
+    });
+
+    // ── Tab 7: Throughput Timeline (RPS & p95 over time from NDJSON) ─────────
+    (function renderT7() {
+      const haveTs = TS_DATA.filter(d => d.ts && d.ts.labels && d.ts.labels.length);
+      if (!haveTs.length) {
+        document.getElementById('t7-empty').style.display = 'block';
+        return;
+      }
+      // Use longest series' labels as the x-axis
+      const base = haveTs.reduce((a, b) => b.ts.labels.length > a.ts.labels.length ? b : a);
+      const palette = ['#1565c0','#ef5350','#2e7d32','#e65100','#6a1b9a','#00838f'];
+      const rpsDS = haveTs.map((d, i) => ({
+        label: d.name + ' rps', data: d.ts.rps,
+        borderColor: palette[i % palette.length], backgroundColor: palette[i % palette.length] + '33',
+        tension: 0.3, fill: false, pointRadius: 0,
+      }));
+      new Chart(document.getElementById('rpsChart'), {
+        type: 'line',
+        data: { labels: base.ts.labels, datasets: rpsDS },
+        options: {
+          responsive: true, plugins: { legend: { position: 'top' } },
+          scales: { y: { beginAtZero: true, title: { display: true, text: 'req/s' } }, x: { title: { display: true, text: 'Time' } } },
+        },
+      });
+      const p95DS = haveTs.map((d, i) => ({
+        label: d.name + ' p95', data: d.ts.p95,
+        borderColor: palette[i % palette.length], backgroundColor: palette[i % palette.length] + '33',
+        tension: 0.3, fill: false, pointRadius: 0,
+      }));
+      p95DS.push({ label: 'SLA p95', data: Array(base.ts.labels.length).fill(P95_SLA), borderColor: '#999', borderDash: [6,3], pointRadius: 0, fill: false });
+      new Chart(document.getElementById('p95TimeChart'), {
+        type: 'line',
+        data: { labels: base.ts.labels, datasets: p95DS },
+        options: {
+          responsive: true, plugins: { legend: { position: 'top' } },
+          scales: { y: { beginAtZero: true, title: { display: true, text: 'p95 (ms)' } }, x: { title: { display: true, text: 'Time' } } },
+        },
+      });
+    })();
+
+    // ── Tab 8: Network Breakdown (stacked bar) ───────────────────────────────
+    new Chart(document.getElementById('netChart'), {
+      type: 'bar',
+      data: {
+        labels: LABELS,
+        datasets: [
+          { label: 'blocked',    data: NET_BLOCKED,    backgroundColor: '#ce93d8' },
+          { label: 'connecting', data: NET_CONNECTING, backgroundColor: '#90caf9' },
+          { label: 'tls',        data: NET_TLS,        backgroundColor: '#80cbc4' },
+          { label: 'sending',    data: NET_SENDING,    backgroundColor: '#ffe082' },
+          { label: 'waiting',    data: NET_WAITING,    backgroundColor: '#ef9a9a' },
+          { label: 'receiving',  data: NET_RECEIVING,  backgroundColor: '#a5d6a7' },
+        ]
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { position: 'top' }, tooltip: { mode: 'index', intersect: false } },
+        scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true, title: { display: true, text: 'ms' } } },
+      },
     });
 
     // ── Tab 4: Sparklines ─────────────────────────────────────────────────────────
@@ -724,7 +1039,24 @@ if (require.main === module) {
         const testType = parts[parts.length - 1] || 'load';
         const sk       = parts.slice(0, -1).join('_') || process.env.ISSUE_KEY || 'UNKNOWN';
         const baseline = compareToBaseline(`${sk}_${testType}`, metrics);
-        results.push({ basename: path.basename(f, '.json'), testType, storyKey: sk, metrics, verdict, breaches, ...baseline });
+        // Build NDJSON-derived time-series for Throughput Timeline tab
+        const timeseries = buildTimeSeries(fp);
+        // Try to enrich with p50/p90 from k6 --summary-export sibling JSON
+        let p50 = 0, p90 = 0;
+        const sumPath = fp.replace(/\.json$/, '-summary.json');
+        if (fs.existsSync(sumPath)) {
+          try {
+            const sx = JSON.parse(fs.readFileSync(sumPath, 'utf8'));
+            const d = sx?.metrics?.http_req_duration?.values || sx?.metrics?.http_req_duration || {};
+            p50 = +(d['p(50)'] ?? d.med ?? 0);
+            p90 = +(d['p(90)'] ?? 0);
+          } catch { /* ignore */ }
+        }
+        results.push({
+          basename: path.basename(f, '.json'), testType, storyKey: sk,
+          metrics: { ...metrics, p50, p90 }, verdict, breaches,
+          timeseries, ...baseline,
+        });
       } catch (_) { /* skip malformed */ }
     }
   }
