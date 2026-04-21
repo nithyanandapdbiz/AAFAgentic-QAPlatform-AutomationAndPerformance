@@ -5,17 +5,10 @@
 firstNameInput: 'input[name="firstName"]'
 middleNameInput: 'input[name="middleName"]'
 lastNameInput: 'input[name="lastName"]'
-
-# Employee ID — the sole input inside the row labelled exactly "Employee Id".
-# NOTE: must use :text-is() (exact match) rather than :text() (substring) —
-# OrangeHRM has multiple labels containing the word "Employee" (First/Middle/
-# Last name groups all live under the "Personal Details" heading which itself
-# contains the word). Using substring matching resolved 4 elements and caused
-# strict-mode violations in tests T172 and T183. Healed proactively.
+# healed: 2026-04-21
 employeeIdGroup: '.oxd-input-group:has(label.oxd-label:text-is("Employee Id"))'
+# healed: 2026-04-21
 employeeIdInput: '.oxd-input-group:has(label.oxd-label:text-is("Employee Id")) input.oxd-input'
-
 saveButton: 'button[type="submit"]'
 cancelButton: 'button.oxd-button--ghost'
-
 validationErrors: '.oxd-input-field-error-message'

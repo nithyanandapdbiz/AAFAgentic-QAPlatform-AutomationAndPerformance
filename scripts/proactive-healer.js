@@ -19,6 +19,8 @@
  *
  * CLI flags:
  *   --dry-run        No writes — preview only
+ *   --standalone     Skip the impact-manifest; probe every YAML in tests/pages/
+ *                    and heal any drift detected in the live build.
  *   --skip-zephyr    Skip Operation B
  *   --skip-pom       Skip Operation A
  *   --skip-specs     Skip Operation C
@@ -26,6 +28,7 @@
  *
  * Usage:
  *   node scripts/proactive-healer.js
+ *   node scripts/proactive-healer.js --standalone
  *   node scripts/proactive-healer.js --dry-run
  */
 
@@ -48,6 +51,7 @@ const HEALED_RESULTS    = path.join(ROOT, 'test-results-healed.json');
 const args = process.argv.slice(2);
 const flags = {
   dryRun:     args.includes('--dry-run'),
+  standalone: args.includes('--standalone'),
   skipZephyr: args.includes('--skip-zephyr'),
   skipPom:    args.includes('--skip-pom'),
   skipSpecs:  args.includes('--skip-specs'),
@@ -85,22 +89,72 @@ function camelToKebab(key) {
   return String(key).replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
 }
 
+// UI-type suffixes stripped when deriving labels/name-attrs from keys.
+const KEY_SUFFIXES = /(Input|Button|Field|Box|Label|Text|Group|Dropdown|Select|Row|Cell|Link|Icon|Image|Header|Title|Msg|Message|Error|Alert)$/;
+
 /**
- * Serialise a locator map to the project's YAML flavour (plain `key: 'value'`
- * lines, comments preserved only for healed keys via `healedKeys`).
+ * Derive a human label from a locator key, stripping UI-type suffixes and
+ * converting camelCase into Title Case words. `employeeIdInput` → "Employee Id".
+ *
+ * @param {string} key
+ * @returns {string|null}
+ */
+function deriveLabelFromKey(key) {
+  const stripped = String(key).replace(KEY_SUFFIXES, '');
+  const words = stripped
+    .replace(/[_-]+/g, ' ')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!words.length) return null;
+  return words.map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
+}
+
+/**
+ * Derive a camelCase name-attribute value from a locator key by stripping the
+ * UI-type suffix. `firstNameInput` → `firstName`.
+ *
+ * @param {string} key
+ * @returns {string}
+ */
+function deriveNameAttr(key) {
+  return String(key).replace(KEY_SUFFIXES, '') || key;
+}
+
+/**
+ * Serialise a locator map to the project's YAML flavour. Preserves the
+ * original file's leading comment block (header documentation) so
+ * hand-written context like route/application/notes is retained.
  *
  * @param {object} locators      Final `{ key: selector }` map.
  * @param {string} pageName      Page name used in the file header comment.
  * @param {string[]} healedKeys  Keys that were auto-healed this run.
+ * @param {string} [existingText] Prior YAML text (used to extract header comments).
  * @returns {string}             YAML text ready to be written to disk.
  */
-function serialiseYaml(locators, pageName, healedKeys = []) {
+function serialiseYaml(locators, pageName, healedKeys = [], existingText = '') {
   const today = new Date().toISOString().slice(0, 10);
-  const lines = [
-    `# ${pageName} locators`,
-    `# Auto-managed by scripts/proactive-healer.js — hand edits allowed.`,
-    '',
-  ];
+  const lines = [];
+
+  // Preserve leading comment block from the original file.
+  if (existingText) {
+    for (const ln of existingText.split(/\r?\n/)) {
+      if (ln.trim().startsWith('#') || ln.trim() === '') {
+        lines.push(ln);
+      } else {
+        break;
+      }
+    }
+  }
+  if (lines.length === 0) {
+    lines.push(
+      `# ${pageName} locators`,
+      `# Auto-managed by scripts/proactive-healer.js — hand edits allowed.`,
+      ''
+    );
+  }
+
   for (const [key, value] of Object.entries(locators)) {
     if (healedKeys.includes(key)) lines.push(`# healed: ${today}`);
     const safe = String(value).replace(/'/g, "\\'");
@@ -110,18 +164,107 @@ function serialiseYaml(locators, pageName, healedKeys = []) {
 }
 
 /**
- * Fail-safe reader for the impact manifest.
- * Exits 1 with a user-friendly message when the manifest is absent — this is
- * always an operator error (run `analyse-impact.js` first).
+ * Fail-safe reader for the impact manifest.  When `--standalone` is set we
+ * instead build a synthetic manifest from every `tests/pages/*.yml` found so
+ * the healer can probe a fresh application build without a pre-computed
+ * impact analysis.
  *
  * @returns {object}  Parsed manifest contents.
  */
 function readManifest() {
+  if (flags.standalone) {
+    return buildStandaloneManifest();
+  }
   if (!fs.existsSync(MANIFEST_PATH)) {
-    logger.error(`[proactive-healer] Missing ${MANIFEST_PATH}. Run scripts/analyse-impact.js first.`);
+    logger.error(`[proactive-healer] Missing ${MANIFEST_PATH}. Run scripts/analyse-impact.js first (or pass --standalone).`);
     process.exit(1);
   }
   return JSON.parse(fs.readFileSync(MANIFEST_PATH, 'utf8'));
+}
+
+/**
+ * Build a minimal manifest by discovering YAML page-objects under
+ * `tests/pages/`. Each file becomes an affectedPages entry using `PAGE_ROUTES`.
+ * Pages without a known route are skipped with a warning.
+ *
+ * @returns {object}
+ */
+function buildStandaloneManifest() {
+  const pagesDir = path.join(ROOT, 'tests', 'pages');
+  if (!fs.existsSync(pagesDir)) return { affectedPages: [], affectedSpecFiles: [], affectedTestKeys: [] };
+
+  const affectedPages = [];
+  for (const f of fs.readdirSync(pagesDir)) {
+    if (!/\.ya?ml$/.test(f)) continue;
+    const pageName = f.replace(/\.ya?ml$/, '');
+    if (!PAGE_ROUTES[pageName]) {
+      logger.warn(`[proactive-healer] No route mapping for ${pageName}; add it to PAGE_ROUTES to probe.`);
+      continue;
+    }
+    const ymlPath = path.join('tests', 'pages', f);
+    const jsPath  = path.join('tests', 'pages', `${pageName}.js`);
+    const text    = fs.readFileSync(path.join(ROOT, ymlPath), 'utf8');
+    const currentLocators = {};
+    for (const line of text.split(/\r?\n/)) {
+      const t = line.trim();
+      if (!t || t.startsWith('#')) continue;
+      const idx = t.indexOf(':');
+      if (idx < 1) continue;
+      const k = t.slice(0, idx).trim();
+      let v = t.slice(idx + 1).trim();
+      if ((v.startsWith("'") && v.endsWith("'")) || (v.startsWith('"') && v.endsWith('"'))) v = v.slice(1, -1);
+      currentLocators[k] = v;
+    }
+    affectedPages.push({ pageName, ymlPath, jsPath, currentLocators });
+  }
+
+  // Discover affected specs = every spec file (proactive = scan the world).
+  const specsDir = path.join(ROOT, 'tests', 'specs');
+  const affectedSpecFiles = fs.existsSync(specsDir)
+    ? fs.readdirSync(specsDir)
+        .filter(f => /\.spec\.js$/.test(f))
+        .map(f => path.join('tests', 'specs', f))
+    : [];
+
+  return { affectedPages, affectedSpecFiles, affectedTestKeys: [], zephyrTestCases: {} };
+}
+
+/**
+ * If the route requires an authenticated session, run the OrangeHRM login
+ * flow using credentials from `tests/data/testData.js`. Silently returns if
+ * the page is already on a post-login route or if the login page itself is
+ * being probed.
+ *
+ * @param {import('playwright').Page} pwPage
+ * @param {string} baseUrl
+ * @param {string} route
+ */
+async function authenticateIfNeeded(pwPage, baseUrl, route) {
+  if (/\/auth\/login/i.test(route)) return;
+  let creds;
+  try {
+    ({ CREDENTIALS: creds } = require('../tests/data/testData'));
+  } catch {
+    return; // no creds available — caller will see the broken probe
+  }
+  const user = creds && creds.admin;
+  if (!user) return;
+
+  await pwPage.goto(baseUrl + '/web/index.php/auth/login', {
+    timeout: 30000, waitUntil: 'domcontentloaded',
+  });
+  // Use the known-good login selectors. These are in LoginPage.yml but we
+  // hard-code the classic OrangeHRM names here so login cannot itself drift.
+  try {
+    await pwPage.fill('input[name="username"]', user.username, { timeout: 10000 });
+    await pwPage.fill('input[name="password"]', user.password, { timeout: 10000 });
+    await Promise.all([
+      pwPage.waitForURL(/\/dashboard\//, { timeout: 20000 }).catch(() => {}),
+      pwPage.click('button[type="submit"]'),
+    ]);
+  } catch (err) {
+    logger.warn(`[proactive-healer] Pre-probe login failed: ${err.message}`);
+  }
 }
 
 // ─── Operation A — POM locator healing ───────────────────────────────────────
@@ -163,35 +306,94 @@ async function healPageObjects(affectedPages) {
       const pwPage  = await ctx.newPage();
 
       try {
+        await authenticateIfNeeded(pwPage, baseUrl, route);
         await pwPage.goto(baseUrl + route, { timeout: 30000, waitUntil: 'domcontentloaded' });
+        await pwPage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
 
         const newLocators = { ...page.currentLocators };
         for (const [key, selector] of Object.entries(page.currentLocators)) {
           let count = 0;
           try { count = await pwPage.locator(selector).count(); } catch { count = 0; }
-          if (count > 0) continue;
+          if (count === 1) continue; // healthy — exactly one match
 
-          pageInfo.broken.push(key);
+          // Skip conditional/collection locators whose count legitimately
+          // varies with page state (errors shown only on failure, tables with
+          // N rows, etc). Heal only when the *structural* selector is drifting.
+          const COLLECTION_RE   = /(Rows|Items|List|Results|Cells|Options|Links|Errors|Tabs|Cards|Groups|Entries|Records)$/;
+          const CONDITIONAL_RE  = /(Alert|Error|Notification|Toast|Warning|Empty|NoRecords|Success|Msg|Message|Loader|Spinner|Modal|Popup|Tooltip)$/i;
+          if (count === 0 && CONDITIONAL_RE.test(key))  continue;
+          if (count >  1 && COLLECTION_RE.test(key))     continue;
 
-          // Try recovery variants in priority order
-          const candidates = [
-            `[aria-label="${key}"]`,
-            `[name="${camelToKebab(key)}"]`,
-            `[placeholder*="${key}"]`,
-            `[data-testid="${key}"]`,
-          ];
+          pageInfo.broken.push({ key, count, selector });
+
+          const label = deriveLabelFromKey(key);
+          const nameAttr = deriveNameAttr(key);
+          const isGroup  = /Group$/.test(key);
+          const isInput  = /Input$/.test(key);
+          const isButton = /Button$/.test(key);
+
+          // Build candidate selectors in priority order. Each candidate is
+          // validated to resolve to exactly ONE element in the live DOM before
+          // being accepted.
+          const candidates = [];
+
+          // (1) Same-structure rewrite: keep the existing selector shape but
+          //     replace every :text(…) / :text-is(…) atom with the key-derived
+          //     label. This preserves semantics (group vs input vs button).
+          if (label && /:text(-is)?\(/.test(selector)) {
+            candidates.push(
+              selector.replace(/:text(?:-is)?\((['"])[^'"]+\1\)/g, `:text-is("${label}")`)
+            );
+          }
+          // (2) Strict-mode recovery — tighten :text to :text-is without
+          //     changing the inner value (useful when label drift is not the
+          //     cause and the text is already correct).
+          if (count > 1 && /:text\(/.test(selector)) {
+            candidates.push(selector.replace(/:text\(/g, ':text-is('));
+          }
+
+          // (3) Structural templates by key suffix (fallback when the current
+          //     selector cannot be repaired in-place).
+          if (isGroup && label) {
+            candidates.push(`.oxd-input-group:has(label:text-is("${label}"))`);
+          }
+          if (isInput && label) {
+            candidates.push(`.oxd-input-group:has(label:text-is("${label}")) input`);
+            candidates.push(`.oxd-input-group:has(label:text-is("${label}")) input.oxd-input`);
+          }
+          if (isButton && label) {
+            candidates.push(`button:has-text("${label}")`);
+            candidates.push(`role=button[name="${label}"]`);
+          }
+
+          // (4) Attribute fallbacks derived from the key.
+          candidates.push(`input[name="${nameAttr}"]`);
+          candidates.push(`[data-testid="${nameAttr}"]`);
+          candidates.push(`[data-testid="${camelToKebab(key)}"]`);
+          candidates.push(`[aria-label="${label || nameAttr}"]`);
+          candidates.push(`[placeholder*="${label || nameAttr}" i]`);
+
           let replacement = null;
           for (const sel of candidates) {
             let c = 0;
             try { c = await pwPage.locator(sel).count(); } catch { c = 0; }
-            if (c > 0) { replacement = sel; break; }
+            if (c === 1) { replacement = sel; break; }
           }
+
           if (replacement) {
             newLocators[key] = replacement;
-            pageInfo.healedKeys.push({ key, from: selector, to: replacement });
+            pageInfo.healedKeys.push({ key, from: selector, to: replacement, reason: count > 1 ? `strict-${count}` : 'missing' });
             healed++;
           } else {
-            pageInfo.manualKeys.push({ key, selector, healStatus: 'manual-review-needed' });
+            // No healthy replacement found.
+            //   count === 0: likely a conditional element not currently on the
+            //     page (validation error, empty-state banner). Demote to info.
+            //   count  >  1: genuine ambiguity — warn loudly so the team can
+            //     disambiguate manually.
+            pageInfo.manualKeys.push({ key, selector, count, healStatus: 'manual-review-needed' });
+            const msg = `[proactive-healer] ${page.pageName}.${key} (matches=${count}) selector=${selector}`;
+            if (count > 1) logger.warn(`${msg} — manual review`);
+            else           logger.info(`${msg} — element not on page (conditional?); skipping`);
             manual++;
           }
         }
@@ -202,9 +404,15 @@ async function healPageObjects(affectedPages) {
           if (flags.dryRun) {
             logger.info(`[proactive-healer][dry-run] Would rewrite ${page.ymlPath} with ${pageInfo.healedKeys.length} healed locator(s)`);
           } else {
-            const yamlText = serialiseYaml(newLocators, page.pageName, pageInfo.healedKeys.map(h => h.key));
+            const prior = fs.existsSync(ymlAbs) ? fs.readFileSync(ymlAbs, 'utf8') : '';
+            const yamlText = serialiseYaml(newLocators, page.pageName, pageInfo.healedKeys.map(h => h.key), prior);
             writeFileAtomic(ymlAbs, yamlText);
             logger.info(`[proactive-healer] Rewrote ${page.ymlPath} (${pageInfo.healedKeys.length} healed)`);
+            for (const h of pageInfo.healedKeys) {
+              logger.info(`    • ${h.key}: ${h.reason || 'fix'}`);
+              logger.info(`        - ${h.from}`);
+              logger.info(`        + ${h.to}`);
+            }
           }
         }
 
