@@ -55,12 +55,23 @@ jobs:
             zap.sh -daemon -host 0.0.0.0 -port 8080 \
             -config api.key=${{ secrets.ZAP_API_KEY }}
           sleep 15
-      # ── 5. Run full QA pipeline ───────────────────────────────────────────
-      #       continue-on-error: true so test failures don't block artifact
-      #       upload and git push steps below.
+      # ── 5a. Pre-flight: fail fast on credential / tool issues ────────────
+      - name: Pre-flight checks
+        run: node scripts/pre-flight.js --include-perf --include-security
+        env:
+          ISSUE_KEY:          ${{ secrets.ISSUE_KEY }}
+          JIRA_URL:           ${{ secrets.JIRA_URL }}
+          JIRA_EMAIL:         ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN:     ${{ secrets.JIRA_API_TOKEN }}
+          ZEPHYR_BASE_URL:    ${{ secrets.ZEPHYR_BASE_URL }}
+          ZEPHYR_ACCESS_KEY:  ${{ secrets.ZEPHYR_ACCESS_KEY }}
+
+      # ── 5. Run full QA pipeline (fail-fast on critical errors) ───────────
+      #       continue-on-error removed: pipeline failures now correctly fail
+      #       the workflow so downstream owners see red badges. Artifacts still
+      #       upload via `if: always()` on each upload step.
       - name: Run full QA pipeline
-        continue-on-error: true
-        run: node scripts/run-qa-complete.js --headless
+        run: node scripts/run-full-pipeline.js --use-runner --include-perf --include-security --headless
         env:
           ISSUE_KEY:          ${{ secrets.ISSUE_KEY }}
           PROJECT_KEY:        ${{ secrets.PROJECT_KEY }}
@@ -81,6 +92,16 @@ jobs:
           ZAP_DOCKER:            'false'
           ZAP_SCAN_TYPE:         'baseline'
           ZAP_FAIL_ON:           'high'
+
+      # ── 5b. Upload pipeline failure report (only if runner halted) ────────
+      - name: Upload pipeline failure report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-failure-report
+          path: logs/pipeline-failure-report.json
+          if-no-files-found: ignore
+          retention-days: 30
 
       # ── 6. Upload Playwright HTML report as artifact ──────────────────────
       - name: Upload Playwright report

@@ -10,6 +10,10 @@
  *  5. Ensure `tags` is an array of lowercase strings
  */
 
+const { logDecision } = require("./agentDecisionLog");
+const { validateReviewerOutput, sanitizeReviewerOutput } = require("../core/schemas");
+const logger = require("../utils/logger");
+
 const VALID_PRIORITIES = new Set(["High", "Normal", "Low"]);
 
 // ── Levenshtein distance ──────────────────────────────────────────────
@@ -68,25 +72,41 @@ function normalise(tc) {
 
 // ── Main review function ──────────────────────────────────────────────
 async function review(testCases) {
-  if (!testCases || testCases.length === 0) return testCases;
+  const inputCount = Array.isArray(testCases) ? testCases.length : 0;
+  if (!testCases || testCases.length === 0) {
+    logDecision('reviewer', { inputCount }, { outputCount: 0, removedDuplicates: 0 }, { note: 'empty input' });
+    return testCases;
+  }
 
   const SIMILARITY_THRESHOLD = 0.85;
   const reviewed = [];
+  let removedDuplicates = 0;
 
   for (const tc of testCases) {
     const enriched = normalise({ ...tc });
-
-    // Dedup: skip if a kept test case has a very similar title
     const isDuplicate = reviewed.some(
       kept => similarity(kept.title, enriched.title) >= SIMILARITY_THRESHOLD
     );
-
     if (!isDuplicate) {
       reviewed.push(enriched);
+    } else {
+      removedDuplicates++;
     }
   }
 
-  return reviewed;
+  let output = reviewed;
+  const { valid, errors } = validateReviewerOutput(output);
+  if (!valid) {
+    logger.warn(`Reviewer output failed schema validation: ${errors.slice(0, 5).join('; ')} — sanitising`);
+    output = sanitizeReviewerOutput(output);
+  }
+
+  logDecision('reviewer', { inputCount }, {
+    outputCount: output.length,
+    removedDuplicates
+  }, { similarityThreshold: SIMILARITY_THRESHOLD });
+
+  return output;
 }
 
 module.exports = { review };

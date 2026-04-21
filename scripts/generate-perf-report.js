@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 /** @module generate-perf-report â€” Generates a detailed self-contained HTML performance test report from k6 results. */
 
 require('dotenv').config();
@@ -30,6 +30,25 @@ function norm(r) {
     baselineDegraded:  r.baselineDegraded ?? false,
     previousP95:      +(r.previousP95  ?? r.baseline?.prevP95  ?? 0) || null,
     changePct:        +(r.changePct    ?? r.baseline?.delta     ?? 0) || null,
+    // Fix 2+3+4 additions
+    warnings:          r.warnings      || [],
+    _warning:          r._warning      || null,
+    baselineDegradedP99:        r.baselineDegradedP99 ?? false,
+    previousP99:               +(r.previousP99 ?? 0) || null,
+    changePct99:               +(r.changePct99 ?? 0) || null,
+    baselineErrorRateIncreased: r.baselineErrorRateIncreased ?? false,
+    previousErrorRate:          +(r.previousErrorRate ?? 0),
+    // Network breakdown (k6 http_req_* sub-metrics)
+    blocked:       +(m.blocked      ?? r.blocked      ?? 0),
+    connecting:    +(m.connecting   ?? r.connecting   ?? 0),
+    tlsHandshake:  +(m.tlsHandshake ?? r.tlsHandshake ?? 0),
+    sending:       +(m.sending      ?? r.sending      ?? 0),
+    waiting:       +(m.waiting      ?? r.waiting      ?? 0),
+    receiving:     +(m.receiving    ?? r.receiving    ?? 0),
+    // Baseline rolling window & trend (Fix 3)
+    trend:           r.trend         || null,
+    historyWindow:   r.historyWindow || [],
+    droppedIterations: +(m.droppedIterations ?? r.droppedIterations ?? 0),
   };
 }
 
@@ -83,6 +102,52 @@ function generatePerfReport(results, thresholds, outputDir) {
     fs.mkdirSync(outputDir, { recursive: true });
 
     const rows       = (results || []).map(norm);
+
+
+    // ── Empty-state guard: no results available ──────────────────────────────
+    if (rows.length === 0) {
+      const emptyHtml = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Performance Report — No Data</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background: #fafafa; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+    .card { background: #fff; border-radius: 12px; padding: 48px 64px; box-shadow: 0 4px 24px rgba(0,0,0,0.08); text-align: center; max-width: 560px; }
+    .icon { font-size: 3rem; margin-bottom: 16px; }
+    h1 { font-size: 1.5rem; color: #1a237e; margin: 0 0 12px; }
+    p { color: #555; margin: 0 0 24px; line-height: 1.6; }
+    .banner { background: #fff8e1; border-left: 4px solid #fbc02d; border-radius: 6px; padding: 14px 20px; text-align: left; font-size: 0.95rem; color: #5d4037; }
+    code { background: #f5f5f5; padding: 2px 8px; border-radius: 4px; font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">⏱️</div>
+    <h1>No Performance Results Available</h1>
+    <p>The performance test pipeline has not yet produced any results for this run.</p>
+    <div class="banner">
+      Run <code>npm run perf</code> (or <code>node scripts/run-perf.js</code>) to generate data,
+      then refresh this report.
+    </div>
+  </div>
+
+  <!-- TAB 5: VU VS LATENCY TIMELINE -->
+  <div id="t5" class="tab-pane">
+    <p style="font-size:0.85rem;color:#888">Dual-axis chart: left Y-axis = p95 latency (ms), right Y-axis = virtual users. Dashed lines = VU ramp. Reads <code>test-results/perf/*-timeseries.csv</code>.</p>
+    <div id="t5-empty" style="display:none;color:#888;padding:24px;text-align:center">No timeseries CSV files found in test-results/perf/. Run tests with k6 to generate them.</div>
+    <div class="chart-wrap"><canvas id="vuLatencyChart" height="90"></canvas></div>
+    <div style="font-size:0.8rem;color:#888;margin-top:8px">SLA p95 annotation line shown in blue dashes.</div>
+  </div>
+
+</body>
+</html>`;
+      const outFile = path.join(outputDir, 'index.html');
+      fs.writeFileSync(outFile, emptyHtml, 'utf8');
+      logger.info('[PerfReport] No results — written empty-state report');
+      return outFile;
+    }
     const generated  = new Date().toISOString();
     const storyKey   = process.env.ISSUE_KEY || 'N/A';
     const jiraUrl    = (process.env.JIRA_URL  || '').replace(/\/$/, '');
@@ -166,6 +231,25 @@ function generatePerfReport(results, thresholds, outputDir) {
     };
 
     const detailCards = sortedRows.map(r => {
+      // ── Amber NDJSON-fallback banner (data quality warning) ───────────────────────
+      const ndjsonBanner = r._warning
+        ? `<div style="background:#fff3e0;border-left:4px solid #e65100;padding:10px 16px;margin-bottom:12px;border-radius:0 6px 6px 0;font-size:0.88rem;color:#bf360c">
+            <strong>⚠️ Metric accuracy warning:</strong> ${r._warning}
+          </div>`
+        : '';
+
+      // ── Yellow near-threshold warnings ──────────────────────────────────────────
+      const nearLimitWarnings = (r.warnings || []).filter(w => w.metric !== 'data-quality');
+      const warningsBox = nearLimitWarnings.length
+        ? `<div style="background:#fffde7;border-left:4px solid #f9a825;padding:10px 16px;margin-bottom:12px;border-radius:0 6px 6px 0;font-size:0.88rem">
+            <strong style="color:#e65100">⚠️ Near-threshold warnings:</strong>
+            <ul style="margin:6px 0 0;padding-left:20px">${nearLimitWarnings.map(w =>
+              `<li>${w.metric}: ${typeof w.value === 'number' ? w.value.toFixed(2) : w.value} is ${w.pctToLimit}% of limit (${w.threshold})</li>`
+            ).join('')}</ul>
+          </div>`
+        : '';
+
+      // ── Red breach alert box ───────────────────────────────────────────────────────────────
       const alertBox = r.breaches.length
         ? `<div class="breach-alert">
             <strong>Threshold breaches:</strong>
@@ -174,15 +258,33 @@ function generatePerfReport(results, thresholds, outputDir) {
             ).join('')}</ul>
           </div>` : '';
 
+      // ── Inline baseline comparison (p95, p99, errorRate) ──────────────────────────
       const bLine = r.previousP95 != null
         ? `<table class="inner baseline-table">
-            <thead><tr><th>Prev p95</th><th>Curr p95</th><th>Delta %</th><th>Status</th></tr></thead>
-            <tbody><tr>
-              <td>${fmt(r.previousP95)} ms</td>
-              <td>${fmt(r.p95)} ms</td>
-              <td style="color:${r.changePct > 0 ? '#e65100':'#2e7d32'}">${r.changePct != null ? (r.changePct > 0 ? '+' : '') + fmt(r.changePct, 1) + '%' : 'â€”'}</td>
-              <td>${r.baselineDegraded ? '<span style="color:#b71c1c">DEGRADED</span>' : '<span style="color:#2e7d32">OK</span>'}</td>
-            </tr></tbody>
+            <thead><tr><th>Metric</th><th>Previous</th><th>Current</th><th>Delta %</th><th>Status</th></tr></thead>
+            <tbody>
+              <tr>
+                <td>p95</td>
+                <td>${fmt(r.previousP95)} ms</td>
+                <td>${fmt(r.p95)} ms</td>
+                <td style="color:${r.changePct > 0 ? '#e65100':'#2e7d32'}">${r.changePct != null ? (r.changePct > 0 ? '+' : '') + fmt(r.changePct, 1) + '%' : '—'}</td>
+                <td>${r.baselineDegraded ? '<span style="color:#b71c1c">DEGRADED</span>' : '<span style="color:#2e7d32">OK</span>'}</td>
+              </tr>
+              ${r.previousP99 ? `<tr>
+                <td>p99</td>
+                <td>${fmt(r.previousP99)} ms</td>
+                <td>${fmt(r.p99)} ms</td>
+                <td style="color:${r.changePct99 > 0 ? '#e65100':'#2e7d32'}">${r.changePct99 != null ? (r.changePct99 > 0 ? '+' : '') + fmt(r.changePct99, 1) + '%' : '—'}</td>
+                <td>${r.baselineDegradedP99 ? '<span style="color:#e65100">DEGRADED</span>' : '<span style="color:#2e7d32">OK</span>'}</td>
+              </tr>` : ''}
+              ${r.previousErrorRate > 0 ? `<tr>
+                <td>errorRate</td>
+                <td>${(r.previousErrorRate * 100).toFixed(2)}%</td>
+                <td>${(r.errorRate * 100).toFixed(2)}%</td>
+                <td style="color:${r.baselineErrorRateIncreased ? '#e65100':'#2e7d32'}">${r.baselineErrorRateIncreased ? '↑ increased' : '↓ stable'}</td>
+                <td>${r.baselineErrorRateIncreased ? '<span style="color:#e65100">⚠ INCREASED</span>' : '<span style="color:#2e7d32">OK</span>'}</td>
+              </tr>` : ''}
+            </tbody>
           </table>` : '<p style="color:#888;font-size:0.85em">No baseline data available.</p>';
 
       return `
@@ -192,7 +294,9 @@ function generatePerfReport(results, thresholds, outputDir) {
             <span class="chevron">&#9660;</span>
           </summary>
           <div class="detail-body">
+            ${ndjsonBanner}
             ${alertBox}
+            ${warningsBox}
             <div class="stat-grid">
               <div class="stat-cell"><span class="stat-label">p95</span><span class="stat-val">${fmt(r.p95)} ms</span></div>
               <div class="stat-cell"><span class="stat-label">p99</span><span class="stat-val">${fmt(r.p99)} ms</span></div>
@@ -203,6 +307,18 @@ function generatePerfReport(results, thresholds, outputDir) {
               <div class="stat-cell"><span class="stat-label">Req/s avg</span><span class="stat-val">${fmt(r.throughput, 1)}</span></div>
               <div class="stat-cell"><span class="stat-label">Think time</span><span class="stat-val">${r.thinkTime}s</span></div>
             </div>
+            <h4>Network Breakdown (avg ms)</h4>
+            <table class="inner" style="width:auto;font-size:0.82rem">
+              <thead><tr><th>DNS blocked</th><th>Connecting</th><th>TLS handshake</th><th>Sending</th><th>Waiting (TTFB)</th><th>Receiving</th></tr></thead>
+              <tbody><tr>
+                <td>${fmt(r.blocked, 1)}</td>
+                <td>${fmt(r.connecting, 1)}</td>
+                <td>${fmt(r.tlsHandshake, 1)}</td>
+                <td>${fmt(r.sending, 1)}</td>
+                <td>${fmt(r.waiting, 1)}</td>
+                <td>${fmt(r.receiving, 1)}</td>
+              </tr></tbody>
+            </table>
             <h4>Baseline comparison</h4>
             ${bLine}
           </div>
@@ -210,21 +326,68 @@ function generatePerfReport(results, thresholds, outputDir) {
     }).join('');
 
     // â”€â”€ Tab 4: Baseline comparison table â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    const baselineRows = sortedRows.map(r => {
+    const baselineRows = sortedRows.map((r, idx) => {
       const deltaNum  = r.changePct ?? 0;
       const tolerance = parseFloat(process.env.PERF_BASELINE_TOLERANCE || '0.20') * 100;
       const deltaCol  = deltaNum > tolerance ? '#b71c1c' : deltaNum > 0 ? '#e65100' : '#2e7d32';
+      const trendArrow = r.trend === 'degrading' ? '&#9650;' : r.trend === 'improving' ? '&#9660;' : r.trend === 'stable' ? '&#8212;' : '';
+      const trendColor = r.trend === 'degrading' ? '#b71c1c' : r.trend === 'improving' ? '#2e7d32' : '#888';
       return `<tr>
         <td>${r.name}</td>
-        <td>${r.previousP95 != null ? fmt(r.previousP95) + ' ms' : 'â€”'}</td>
+        <td>${r.previousP95 != null ? fmt(r.previousP95) + ' ms' : '&mdash;'}</td>
         <td>${fmt(r.p95)} ms</td>
-        <td style="color:${deltaCol}">${r.changePct != null ? (deltaNum > 0 ? '+' : '') + fmt(r.changePct, 1) + '%' : 'â€”'}</td>
+        <td style="color:${deltaCol}">${r.changePct != null ? (deltaNum > 0 ? '+' : '') + fmt(r.changePct, 1) + '%' : '&mdash;'}</td>
         <td>${tolerance}%</td>
+        <td style="color:${trendColor};font-weight:bold">${trendArrow} ${r.trend || '&mdash;'}</td>
+        <td><canvas id="spark_${idx}" width="80" height="30"></canvas></td>
         <td>${r.baselineDegraded ? '<span style="color:#b71c1c;font-weight:bold">DEGRADED</span>' : '<span style="color:#2e7d32">OK</span>'}</td>
       </tr>`;
     }).join('');
 
-    // â”€â”€ Assemble HTML â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Build sparkline data for Tab 4 (rolling p95 history per row)
+    const sparkData = sortedRows.map(r => ({
+      history: (r.historyWindow || []).map(h => Math.round(h.p95 || 0)).filter(v => v > 0),
+    }));
+
+    // ── Tab 5: VU vs Latency Timeline data ────────────────────────────────────────
+    const perfResultsDir = path.join(ROOT, 'test-results', 'perf');
+    const timelineDatasets = [];
+    if (fs.existsSync(perfResultsDir)) {
+      const csvFiles = fs.readdirSync(perfResultsDir).filter(f => f.endsWith('-timeseries.csv'));
+      for (const cf of csvFiles) {
+        try {
+          const lines = fs.readFileSync(path.join(perfResultsDir, cf), 'utf8').split('\n').filter(Boolean);
+          if (lines.length < 2) continue;
+          const headers = lines[0].split(',');
+          const p95Col  = headers.indexOf('p95');
+          const vuCol   = headers.indexOf('vus_max');
+          const tCol    = headers.indexOf('timestamp');
+          if (p95Col < 0) continue;
+          const label  = cf.replace('-timeseries.csv', '');
+          const p95Pts = lines.slice(1).map(l => +l.split(',')[p95Col] || null).filter(v => v !== null);
+          const vuPts  = vuCol  >= 0 ? lines.slice(1).map(l => +l.split(',')[vuCol]  || null).filter(v => v !== null) : [];
+          const tlbls  = tCol   >= 0 ? lines.slice(1).map(l => l.split(',')[tCol] || '').slice(0, p95Pts.length) : p95Pts.map((_, i) => String(i + 1));
+          timelineDatasets.push({ label, p95: p95Pts, vus: vuPts, labels: tlbls });
+        } catch { /* skip */ }
+      }
+    }
+    const timelineLabels = timelineDatasets[0]?.labels || [];
+    const timelineP95DS  = timelineDatasets.map((ds, i) => ({
+      label: ds.label + ' p95 (ms)',
+      data:  ds.p95,
+      borderColor: Object.values(TYPE_COLOURS)[i % Object.keys(TYPE_COLOURS).length],
+      yAxisID: 'yLatency', tension: 0.3, fill: false,
+    }));
+    const timelineVuDS = timelineDatasets.map((ds, i) => ({
+      label: ds.label + ' VUs',
+      data:  ds.vus,
+      borderColor: Object.values(TYPE_COLOURS)[i % Object.keys(TYPE_COLOURS).length],
+      borderDash: [4, 3],
+      yAxisID: 'yVUs', tension: 0.3, fill: false,
+    }));
+
+    // ── Assemble HTML ──────────────────────────────────────────────────────────────
+    
     const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -293,11 +456,20 @@ function generatePerfReport(results, thresholds, outputDir) {
     footer{margin-top:40px;padding-top:16px;border-top:1px solid #e0e0e0;font-size:0.78rem;color:#888;display:flex;gap:20px;flex-wrap:wrap}
     footer a{color:#1565c0;text-decoration:none}
     @media(max-width:700px){.sla-grid{grid-template-columns:repeat(2,1fr)}.stat-grid{grid-template-columns:repeat(2,1fr)}}
+    @media print{
+      .tab-bar,.tab-btn{display:none!important}
+      .tab-pane{display:block!important}
+      .detail-card[open] .detail-body{display:block!important}
+      footer a{color:#000!important}
+    }
   </style>
 </head>
 <body>
   <!-- â”€â”€ HEADER â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
-  <h1>&#128200; Performance test report</h1>
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;margin-bottom:4px">
+  <h1 style="margin:0">&#128200; Performance test report</h1>
+  <button onclick="window.print()" style="background:#1565c0;color:#fff;border:none;border-radius:6px;padding:8px 18px;cursor:pointer;font-size:0.9rem;font-weight:600">&#128196; Export PDF</button>
+  </div>
   <div class="header-meta">
     Story: <strong>${storyKey}</strong> &nbsp;|&nbsp;
     Run: <strong>${generated}</strong> &nbsp;|&nbsp;
@@ -343,6 +515,7 @@ function generatePerfReport(results, thresholds, outputDir) {
     <button class="tab-btn"       onclick="showTab('t2',this)">All Scripts Table</button>
     <button class="tab-btn"       onclick="showTab('t3',this)">Script Details</button>
     <button class="tab-btn"       onclick="showTab('t4',this)">Baseline Comparison</button>
+    <button class="tab-btn"       onclick="showTab('t5',this)">VU vs Latency Timeline</button>
   </div>
 
   <!-- TAB 1: RESPONSE TIME CHARTS -->
@@ -382,7 +555,7 @@ function generatePerfReport(results, thresholds, outputDir) {
   <div id="t4" class="tab-pane">
     <table>
       <thead>
-        <tr><th>Script</th><th>Prev p95</th><th>Curr p95</th><th>Delta</th><th>Threshold</th><th>Status</th></tr>
+        <tr><th>Script</th><th>Prev p95</th><th>Current p95</th><th>Delta</th><th>Tolerance</th><th>Trend</th><th>History</th><th>Status</th></tr>
       </thead>
       <tbody>
         ${baselineRows || '<tr><td colspan="6" style="text-align:center;color:#888">No baseline data</td></tr>'}
@@ -453,6 +626,57 @@ function generatePerfReport(results, thresholds, outputDir) {
         scales: { y: { beginAtZero: true, title: { display: true, text: '%' } } }
       }
     });
+
+    // ── Tab 4: Sparklines ─────────────────────────────────────────────────────────
+    const SPARK_DATA_EMBEDDED = ${JSON.stringify(sparkData)};
+    function drawSparklines() {
+      SPARK_DATA_EMBEDDED.forEach((sd, idx) => {
+        const canvas = document.getElementById('spark_' + idx);
+        if (!canvas || !sd.history || sd.history.length < 2) return;
+        new Chart(canvas, {
+          type: 'line',
+          data: {
+            labels: sd.history.map((_, i) => i + 1),
+            datasets: [{ data: sd.history, borderColor: '#1565c0', borderWidth: 1.5, pointRadius: 0, fill: false, tension: 0.3 }],
+          },
+          options: {
+            animation: false,
+            plugins: { legend: { display: false }, tooltip: { enabled: false } },
+            scales: { x: { display: false }, y: { display: false } },
+          },
+        });
+      });
+    }
+    drawSparklines();
+
+    // ── Tab 5: VU vs Latency Timeline ─────────────────────────────────────────────
+    const TIMELINE_LABELS_EMBEDDED = ${JSON.stringify(timelineLabels)};
+    const TIMELINE_P95_DS_EMBEDDED = ${JSON.stringify(timelineP95DS)};
+    const TIMELINE_VU_DS_EMBEDDED  = ${JSON.stringify(timelineVuDS)};
+    if (TIMELINE_LABELS_EMBEDDED.length === 0) {
+      const emptyEl = document.getElementById('t5-empty');
+      if (emptyEl) emptyEl.style.display = 'block';
+    } else {
+      new Chart(document.getElementById('vuLatencyChart'), {
+        type: 'line',
+        data: {
+          labels: TIMELINE_LABELS_EMBEDDED,
+          datasets: [
+            ...TIMELINE_P95_DS_EMBEDDED,
+            ...TIMELINE_VU_DS_EMBEDDED,
+            { label: 'SLA p95', data: Array(TIMELINE_LABELS_EMBEDDED.length).fill(P95_SLA), borderColor: '#1565c0', borderDash: [6, 3], pointRadius: 0, fill: false, yAxisID: 'yLatency' },
+          ],
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { position: 'top' } },
+          scales: {
+            yLatency: { type: 'linear', position: 'left',  title: { display: true, text: 'p95 (ms)' } },
+            yVUs:     { type: 'linear', position: 'right', title: { display: true, text: 'VUs' }, grid: { drawOnChartArea: false } },
+          },
+        },
+      });
+    }
   </script>
 </body>
 </html>`;

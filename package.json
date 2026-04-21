@@ -20,6 +20,7 @@
     "perf:soak": "node scripts/run-perf.js --test-type=soak",
     "perf:generate": "node scripts/generate-perf-scripts.js",
     "perf:report": "node scripts/generate-perf-report.js",
+    "perf:dry-run": "node scripts/run-perf.js --dry-run",
     "qa:with-perf": "node scripts/qa-run.js --include-perf",
     "security": "node scripts/run-security.js",
     "security:no-zap": "node scripts/run-security.js --no-zap",
@@ -42,7 +43,11 @@
     "heal:smart": "node scripts/smart-healer.js",
     "heal:full": "npm run heal:classify && npm run heal:visual && npm run heal:dom && npm run heal:api && npm run heal:smart",
     "heal:dry-run": "node scripts/smart-healer.js --dry-run --skip-zephyr",
-    "heal:update-baseline": "node scripts/visual-diff.js --update-baseline --all"
+    "heal:update-baseline": "node scripts/visual-diff.js --update-baseline --all",
+    "test:unit": "npx playwright test --config=playwright.unit.config.js",
+    "pipeline:full": "node scripts/run-full-pipeline.js --use-runner --include-perf --include-security",
+    "pipeline:functional": "node scripts/run-full-pipeline.js --use-runner",
+    "preflight": "node scripts/pre-flight.js"
   },
   "dependencies": {
     "axios": "^1.6.0",

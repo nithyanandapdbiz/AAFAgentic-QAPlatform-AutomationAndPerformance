@@ -36,13 +36,45 @@
  */
 
 require('dotenv').config();
-const { spawnSync } = require('child_process');
-const fs            = require('fs');
-const path          = require('path');
+const { spawnSync, spawn } = require('child_process');
+const fs                   = require('fs');
+const path                 = require('path');
+const readline             = require('readline');
 
 const ROOT  = path.resolve(__dirname, '..');
 const args  = process.argv.slice(2);
 const flags = new Set(args.map(a => a.toLowerCase()));
+
+// ─── Opt-in new pipeline runner (backward-compatible) ─────────────────────
+// When PIPELINE_USE_RUNNER=true or --use-runner is passed, delegate to the
+// consolidated src/pipeline/runner with a named preset (PIPELINE_PRESET, default 'full').
+// Default (unset) keeps the legacy STAGES[] path so existing CI does not change.
+if (process.env.PIPELINE_USE_RUNNER === 'true' || flags.has('--use-runner')) {
+  (async () => {
+    const { runPipeline } = require('../src/pipeline/runner');
+    const { PRESETS }     = require('../src/pipeline/presets');
+    const presetName = process.env.PIPELINE_PRESET || 'full';
+    const steps = PRESETS[presetName] || PRESETS.full;
+    const ctx = {
+      issueKey: process.env.ISSUE_KEY || null,
+      flags: {
+        headless:        flags.has('--headless') || process.env.PW_HEADLESS === 'true',
+        force:           flags.has('--force'),
+        includePerf:     flags.has('--include-perf'),
+        includeSecurity: flags.has('--include-security'),
+        skipHeal:        flags.has('--skip-heal'),
+        skipSmartHeal:   flags.has('--skip-smart-heal'),
+        skipBugs:        flags.has('--skip-bugs'),
+        skipGit:         flags.has('--skip-git')
+      }
+    };
+    const result = await runPipeline(steps, ctx);
+    console.log(`\nPipeline summary: ${result.passed} passed, ${result.warned} warned, ${result.failed} failed, ${result.skipped} skipped, ${(result.durationMs/1000).toFixed(1)}s total`);
+    process.exit(result.failed > 0 ? 1 : 0);
+  })().catch(err => { console.error(err); process.exit(1); });
+  return;
+}
+
 
 const useHeadless    = flags.has('--headless') || process.env.PW_HEADLESS === 'true';
 const useForce       = flags.has('--force');
@@ -75,6 +107,8 @@ function banner() {
   console.log(row(`  Force  : ${useForce ? 'YES — will recreate Zephyr test cases' : 'No (dedup active)'}`));
   console.log(row(`  Perf   : ${includePerf ? 'YES — k6 performance tests enabled' : 'No (use --include-perf)'}`));
   console.log(row(`  Sec    : ${includeSecurity ? 'YES — ZAP + custom security scans enabled' : 'No (use --include-security)'}`));
+  if (includePerf && includeSecurity)
+    console.log(row('  ⚡      : Perf + Security will run IN PARALLEL'));
   console.log(row(`  Time   : ${now()}`));
   console.log(`${C.bold}${C.purple}╚${B}╝${C.reset}\n`);
 }
@@ -104,6 +138,31 @@ function runScript(relPath, extraEnv = {}) {
   });
   const exitCode = r.status ?? (r.error ? 1 : 0);
   return { ok: exitCode === 0, exitCode };
+}
+
+/** Spawn a script non-blocking; prefix every stdout/stderr line with colorPrefix.
+ *  Also writes a dedicate log file under logs/ for post-run inspection. */
+function runScriptAsync(relPath, colorPrefix, extraEnv = {}) {
+  return new Promise(resolve => {
+    const abs = path.join(ROOT, relPath);
+    if (!fs.existsSync(abs)) {
+      process.stderr.write(`${C.red}  Script not found: ${relPath}${C.reset}\n`);
+      resolve({ ok: false, exitCode: 1 });
+      return;
+    }
+    const logsDir = path.join(ROOT, 'logs');
+    if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
+    const logFile   = path.join(logsDir, `${path.basename(relPath, '.js')}-${Date.now()}.log`);
+    const logStream = fs.createWriteStream(logFile, { flags: 'a' });
+    const child = spawn('node', [abs], {
+      cwd: ROOT, env: { ...process.env, ...extraEnv }, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    readline.createInterface({ input: child.stdout })
+      .on('line', l => { process.stdout.write(`${colorPrefix} ${l}\n`); logStream.write(l + '\n'); });
+    readline.createInterface({ input: child.stderr })
+      .on('line', l => { process.stdout.write(`${colorPrefix} ${C.dim}${l}${C.reset}\n`); logStream.write(l + '\n'); });
+    child.on('close', code => { logStream.end(); resolve({ ok: (code ?? 1) === 0, exitCode: code ?? 1, logFile }); });
+  });
 }
 
 // ─── Pipeline stages ───────────────────────────────────────────────────────
@@ -144,6 +203,7 @@ const STAGES = [
     num: '3p', label: 'Performance tests — k6 pipeline',
     desc: 'Generates k6 scripts, executes them, evaluates thresholds, syncs to Zephyr, produces perf report',
     script: 'scripts/run-perf.js',
+    parallel: true,
     skip: () => !includePerf,
     skipMsg: 'Perf tests skipped  (use --include-perf)',
     softFail: true,
@@ -153,6 +213,7 @@ const STAGES = [
     num: '3s', label: 'Security tests — ZAP + custom checks',
     desc: 'Runs OWASP ZAP baseline scan + 10 custom security checks, evaluates findings, produces security report',
     script: 'scripts/run-security.js',
+    parallel: true,
     skip: () => !includeSecurity,
     skipMsg: 'Security tests skipped  (use --include-security)',
     softFail: true
@@ -208,16 +269,84 @@ async function main() {
 
   const summary = [];
 
-  for (const stage of STAGES) {
+  // Prefix colours used when parallel stages interleave their output
+  const PAR_PREFIX = [
+    `${C.bold}${C.cyan}[3p·PERF]${C.reset}`,
+    `${C.bold}${C.purple}[3s·SEC ]${C.reset}`,
+  ];
+
+  let si = 0;
+  let halted = false;
+  while (si < STAGES.length && !halted) {
+    const stage = STAGES[si];
+
+    // ── Parallel group: collect all consecutive parallel-flagged stages ────
+    if (stage.parallel) {
+      const group = [];
+      while (si < STAGES.length && STAGES[si].parallel) { group.push(STAGES[si]); si++; }
+
+      const runnable = group.filter(s => !s.skip());
+      const skippedG = group.filter(s => s.skip());
+      for (const s of skippedG) {
+        stageHeader(s.num, total, s.label, true);
+        console.log(`  ${C.yellow}↷ Skipped${C.reset}  ${C.dim}${s.skipMsg || ''}${C.reset}\n`);
+        summary.push({ num: s.num, label: s.label, status: 'SKIPPED', ms: 0 });
+      }
+
+      if (runnable.length === 0) continue;
+
+      if (runnable.length === 1) {
+        // Only one enabled — no parallelism needed, use normal sequential path
+        const s = runnable[0];
+        stageHeader(s.num, total, s.label, false);
+        if (s.desc) console.log(`  ${C.dim}${s.desc}${C.reset}\n`);
+        const extraEnv = s.extraEnv ? s.extraEnv() : {};
+        const ts = Date.now();
+        const { ok, exitCode } = runScript(s.script, extraEnv);
+        const ms = Date.now() - ts;
+        stageDone(s.num, s.label, ok, ms);
+        const isSoft = !ok && s.softFail;
+        summary.push({ num: s.num, label: s.label, status: ok ? 'PASS' : (isSoft ? 'WARN' : 'FAIL'), ms, exitCode });
+        if (!ok && !isSoft) { console.error(`\n${C.red}  Pipeline halted at Stage ${s.num} (exit ${exitCode}).${C.reset}\n`); halted = true; }
+        continue;
+      }
+
+      // ── True parallel execution ──────────────────────────────────────────
+      const names = runnable.map(s => `Stage ${s.num}`).join(' + ');
+      console.log(`\n${C.bold}${C.cyan}╔${'═'.repeat(58)}╗${C.reset}`);
+      console.log(`${C.bold}${C.cyan}║  ⚡ PARALLEL — ${names} running simultaneously${C.reset}`);
+      console.log(`${C.bold}${C.cyan}║  Output prefixed: ${PAR_PREFIX.slice(0, runnable.length).join('  ')}${C.reset}`);
+      console.log(`${C.bold}${C.cyan}╚${'═'.repeat(58)}╝${C.reset}\n`);
+
+      const ts = Date.now();
+      const results = await Promise.all(
+        runnable.map((s, idx) =>
+          runScriptAsync(s.script, PAR_PREFIX[idx] || `[${s.num}]`, s.extraEnv ? s.extraEnv() : {})
+            .then(r => ({ s, ...r }))
+        )
+      );
+      const elapsed = Date.now() - ts;
+      console.log(`\n${C.bold}${C.cyan}── Parallel group complete in ${(elapsed / 1000).toFixed(1)}s ──${C.reset}\n`);
+
+      for (const { s, ok, exitCode, logFile } of results) {
+        const isSoft = !ok && s.softFail;
+        stageDone(s.num, s.label, ok, elapsed);
+        if (logFile) console.log(`  ${C.dim}Full log: ${path.relative(ROOT, logFile)}${C.reset}`);
+        summary.push({ num: s.num, label: s.label, status: ok ? 'PASS' : (isSoft ? 'WARN' : 'FAIL'), ms: elapsed, exitCode });
+        if (!ok && !isSoft) { console.error(`\n${C.red}  Pipeline halted at Stage ${s.num} (exit ${exitCode}).${C.reset}\n`); halted = true; }
+      }
+      continue;
+    }
+
+    // ── Sequential stage ──────────────────────────────────────────────────
     const skipped = stage.skip();
     stageHeader(stage.num, total, stage.label, skipped);
-
     if (!skipped && stage.desc) console.log(`  ${C.dim}${stage.desc}${C.reset}\n`);
 
     if (skipped) {
       console.log(`  ${C.yellow}↷ Skipped${C.reset}  ${C.dim}${stage.skipMsg || ''}${C.reset}\n`);
       summary.push({ num: stage.num, label: stage.label, status: 'SKIPPED', ms: 0 });
-      continue;
+      si++; continue;
     }
 
     const extraEnv = stage.extraEnv ? stage.extraEnv() : {};
@@ -232,11 +361,11 @@ async function main() {
       status: ok ? 'PASS' : (isSoft ? 'WARN' : 'FAIL'),
       ms, exitCode
     });
-
     if (!ok && !isSoft) {
       console.error(`\n${C.red}  Pipeline halted at Stage ${stage.num} (exit ${exitCode}).${C.reset}\n`);
-      break;
+      halted = true;
     }
+    si++;
   }
 
   // ── Summary table ──────────────────────────────────────────────────────

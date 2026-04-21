@@ -502,8 +502,13 @@ async function main() {
   console.log(`  Found ${testCases.length} test case(s)\n`);
 
   if (!testCases.length) {
-    console.log('  No test cases found. Exiting.');
-    return;
+    // Zero-spec guard: no test cases to convert. Exit code 2 is a sentinel the
+    // pipeline runner (`src/pipeline/steps.js :: generateSpecs`) converts into
+    // a PreconditionError that halts the pipeline with an actionable hint.
+    console.error('\n  ABORT: No Playwright specs were generated — Zephyr returned zero test cases.');
+    console.error('  Hint: run scripts/run-story.js first to create the Zephyr test cases for the story,');
+    console.error('        or verify PROJECT_KEY/ISSUE_KEY/ZEPHYR_ACCESS_KEY in .env.');
+    process.exit(2);
   }
 
   // ── 2. Ensure output directory ────────────────────────────────────────────
@@ -550,6 +555,14 @@ async function main() {
 
   // ── 4. Summary ────────────────────────────────────────────────────────────
   console.log(`\n  ✓ ${written} spec file(s) written to tests/specs/`);
+
+  // Zero-spec guard (post-write safety net): if every iteration silently
+  // skipped, still exit with code 2 so the pipeline aborts cleanly.
+  if (written === 0) {
+    console.error('  ABORT: Zero spec files written to tests/specs/ despite non-empty test case list.');
+    process.exit(2);
+  }
+
   console.log(`\n  Run tests:`);
   console.log(`    npx playwright test\n`);
 }

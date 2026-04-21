@@ -69,7 +69,7 @@ const flags = new Set(args.map(a => a.toLowerCase()));
 const tagIdx = args.findIndex(a => a.toLowerCase() === '--tag');
 const rawTag = tagIdx !== -1 ? args[tagIdx + 1] : null;
 
-const useHeadless = false;  // always run headed — visible browser
+const useHeadless = flags.has('--headless') || process.env.PW_HEADLESS === 'true';
 const listOnly    = flags.has('--list-only');
 
 // ─── Tag → grep pattern map ────────────────────────────────────────────────

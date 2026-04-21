@@ -1,5 +1,11 @@
 'use strict';
-/** @module run-qa-complete — Unified 14-stage QA pipeline orchestrating functional (Playwright), performance (k6), and security (OWASP ZAP + custom checks) testing. */
+/**
+ * @deprecated Use `node scripts/run-full-pipeline.js --use-runner --include-perf --include-security`
+ *             or call `require('../src/pipeline/runner').runPipeline(PRESETS.full, ctx)` directly.
+ *             This script is kept for backward compatibility and will be removed in a future major release.
+ *
+ * @module run-qa-complete — Unified 14-stage QA pipeline orchestrating functional (Playwright), performance (k6), and security (OWASP ZAP + custom checks) testing.
+ */
 
 require('dotenv').config();
 const fs     = require('fs');
@@ -342,12 +348,7 @@ async function main() {
     try {
       const { generatePerfReport } = require('./generate-perf-report');
       const perfDir = path.join(ROOT, 'custom-report', 'perf');
-      const perfThresholds = {
-        p95:       parseInt(process.env.PERF_THRESHOLDS_P95  || '2000', 10),
-        p99:       parseInt(process.env.PERF_THRESHOLDS_P99  || '5000', 10),
-        errorRate: parseFloat(process.env.PERF_THRESHOLDS_ERROR_RATE || '0.01'),
-      };
-      generatePerfReport(collectedPerfResults, perfThresholds, perfDir);
+      generatePerfReport(collectedPerfResults, null, perfDir);
       console.log(`  ${C.green}✓ Perf report generated${C.reset}`);
     } catch (err) { logger.warn(`Perf report non-fatal: ${err.message}`); }
   }

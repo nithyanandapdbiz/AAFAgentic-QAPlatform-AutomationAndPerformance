@@ -17,36 +17,127 @@
  */
 
 const logger = require("../utils/logger");
+const { logDecision } = require("./agentDecisionLog");
+const { validatePlannerOutput, sanitizePlannerOutput } = require("../core/schemas");
 
-// Keywords that indicate each test type applies
-const TYPE_SIGNALS = {
-  "Happy Path":     ["create", "add", "submit", "save", "login", "upload", "register", "complete", "update"],
-  "Negative":       ["fail", "error", "invalid", "reject", "deny", "wrong", "missing", "not", "prevent"],
-  "Edge Case":      ["empty", "null", "zero", "max", "min", "limit", "large", "special", "unicode", "blank"],
-  "UI Validation":  ["field", "form", "input", "label", "button", "display", "screen", "page", "ui", "view"],
-  "Security":       ["password", "auth", "permission", "access", "role", "admin", "token", "login", "secure"],
-  "Boundary":       ["limit", "max", "min", "length", "count", "number", "size", "range", "character"],
-  "Integration":    ["api", "sync", "service", "connect", "external", "third", "webhook", "email", "notification"],
-  "performance":    [
-    "load test", "stress test", "spike", "soak", "throughput",
-    "latency", "response time", "concurrent users", "sla",
-    "scalability", "performance", "benchmark"
-  ],
-  "security":       [
-    "authentication", "authorisation", "authorization", "session",
-    "token", "jwt", "password", "rbac", "permission", "injection", "xss",
-    "csrf", "sql", "cookie", "sensitive data", "encryption", "ssl", "tls",
-    "security header", "redirect", "owasp", "vulnerability"
-  ],
-  "security-scan":  [
-    "owasp", "zap", "vulnerability", "penetration", "pentest",
-    "injection", "xss", "csrf", "sql injection", "broken auth",
-    "access control", "cryptographic", "misconfiguration",
-    "insecure", "sensitive data", "idor", "ssrf", "brute force",
-    "session fixation", "open redirect", "security scan",
-    "security audit", "security testing"
-  ]
-};
+// ── Weighted keyword registry ───────────────────────────────────────
+// Each entry: { keyword, weight (1-3), category }. Higher weight = stronger signal.
+// Categories align with test-type labels emitted in the plan.
+const WEIGHTED_KEYWORDS = [
+  // Happy Path (weight: strong verbs tied to the primary user action)
+  { keyword: "create",    weight: 2, category: "Happy Path" },
+  { keyword: "add",       weight: 2, category: "Happy Path" },
+  { keyword: "submit",    weight: 2, category: "Happy Path" },
+  { keyword: "save",      weight: 2, category: "Happy Path" },
+  { keyword: "register",  weight: 2, category: "Happy Path" },
+  { keyword: "complete",  weight: 1, category: "Happy Path" },
+  { keyword: "update",    weight: 2, category: "Happy Path" },
+  { keyword: "login",     weight: 3, category: "Happy Path" },
+  { keyword: "upload",    weight: 2, category: "Happy Path" },
+
+  // Negative (error-oriented words)
+  { keyword: "error",     weight: 2, category: "Negative" },
+  { keyword: "invalid",   weight: 3, category: "Negative" },
+  { keyword: "reject",    weight: 3, category: "Negative" },
+  { keyword: "deny",      weight: 2, category: "Negative" },
+  { keyword: "fail",      weight: 2, category: "Negative" },
+  { keyword: "missing",   weight: 2, category: "Negative" },
+  { keyword: "prevent",   weight: 2, category: "Negative" },
+  { keyword: "wrong",     weight: 1, category: "Negative" },
+
+  // Edge Case
+  { keyword: "empty",     weight: 2, category: "Edge Case" },
+  { keyword: "null",      weight: 2, category: "Edge Case" },
+  { keyword: "zero",      weight: 1, category: "Edge Case" },
+  { keyword: "max",       weight: 2, category: "Edge Case" },
+  { keyword: "min",       weight: 2, category: "Edge Case" },
+  { keyword: "unicode",   weight: 3, category: "Edge Case" },
+  { keyword: "special character", weight: 3, category: "Edge Case" },
+
+  // UI Validation
+  { keyword: "field",     weight: 1, category: "UI Validation" },
+  { keyword: "form",      weight: 2, category: "UI Validation" },
+  { keyword: "input",     weight: 1, category: "UI Validation" },
+  { keyword: "button",    weight: 1, category: "UI Validation" },
+  { keyword: "display",   weight: 1, category: "UI Validation" },
+  { keyword: "screen",    weight: 1, category: "UI Validation" },
+  { keyword: "label",     weight: 1, category: "UI Validation" },
+
+  // Security
+  { keyword: "password",  weight: 3, category: "Security" },
+  { keyword: "auth",      weight: 3, category: "Security" },
+  { keyword: "permission",weight: 3, category: "Security" },
+  { keyword: "role",      weight: 2, category: "Security" },
+  { keyword: "rbac",      weight: 3, category: "Security" },
+  { keyword: "admin",     weight: 2, category: "Security" },
+  { keyword: "token",     weight: 3, category: "Security" },
+  { keyword: "injection", weight: 3, category: "Security" },
+  { keyword: "xss",       weight: 3, category: "Security" },
+  { keyword: "csrf",      weight: 3, category: "Security" },
+  { keyword: "encryption",weight: 3, category: "Security" },
+  { keyword: "session",   weight: 2, category: "Security" },
+  { keyword: "owasp",     weight: 3, category: "Security" },
+
+  // Boundary
+  { keyword: "limit",     weight: 2, category: "Boundary" },
+  { keyword: "length",    weight: 2, category: "Boundary" },
+  { keyword: "range",     weight: 2, category: "Boundary" },
+  { keyword: "size",      weight: 1, category: "Boundary" },
+  { keyword: "boundary",  weight: 3, category: "Boundary" },
+  { keyword: "character", weight: 1, category: "Boundary" },
+
+  // Integration
+  { keyword: "api",       weight: 2, category: "Integration" },
+  { keyword: "webhook",   weight: 3, category: "Integration" },
+  { keyword: "sync",      weight: 2, category: "Integration" },
+  { keyword: "service",   weight: 1, category: "Integration" },
+  { keyword: "external",  weight: 2, category: "Integration" },
+  { keyword: "third",     weight: 2, category: "Integration" },
+  { keyword: "notification", weight: 2, category: "Integration" },
+  { keyword: "email",     weight: 1, category: "Integration" },
+
+  // Performance
+  { keyword: "load test", weight: 3, category: "performance" },
+  { keyword: "stress test", weight: 3, category: "performance" },
+  { keyword: "spike",     weight: 3, category: "performance" },
+  { keyword: "soak",      weight: 3, category: "performance" },
+  { keyword: "throughput",weight: 3, category: "performance" },
+  { keyword: "latency",   weight: 3, category: "performance" },
+  { keyword: "response time", weight: 3, category: "performance" },
+  { keyword: "concurrent users", weight: 3, category: "performance" },
+  { keyword: "sla",       weight: 2, category: "performance" },
+  { keyword: "scalability", weight: 3, category: "performance" },
+  { keyword: "performance", weight: 2, category: "performance" },
+  { keyword: "benchmark", weight: 2, category: "performance" },
+
+  // Security-scan (maps to ZAP signals)
+  { keyword: "zap",       weight: 3, category: "security-scan" },
+  { keyword: "vulnerability", weight: 3, category: "security-scan" },
+  { keyword: "penetration", weight: 3, category: "security-scan" },
+  { keyword: "pentest",   weight: 3, category: "security-scan" },
+  { keyword: "sql injection", weight: 3, category: "security-scan" },
+  { keyword: "broken auth", weight: 3, category: "security-scan" },
+  { keyword: "ssrf",      weight: 3, category: "security-scan" },
+  { keyword: "idor",      weight: 3, category: "security-scan" },
+  { keyword: "security scan", weight: 3, category: "security-scan" },
+  { keyword: "security audit", weight: 3, category: "security-scan" },
+
+  // Security (functional aspects — distinct category expected by downstream code)
+  { keyword: "authentication", weight: 3, category: "security" },
+  { keyword: "authorisation",  weight: 3, category: "security" },
+  { keyword: "authorization",  weight: 3, category: "security" },
+  { keyword: "jwt",       weight: 3, category: "security" },
+  { keyword: "cookie",    weight: 2, category: "security" },
+  { keyword: "ssl",       weight: 2, category: "security" },
+  { keyword: "tls",       weight: 2, category: "security" },
+  { keyword: "security header", weight: 3, category: "security" },
+];
+
+// Legacy flat arrays kept for any external consumer / back-compat import.
+const TYPE_SIGNALS = WEIGHTED_KEYWORDS.reduce((acc, { keyword, category }) => {
+  (acc[category] = acc[category] || []).push(keyword);
+  return acc;
+}, {});
 
 // Design technique selection based on story content
 const TECHNIQUE_SIGNALS = {
@@ -90,19 +181,53 @@ async function plan(story) {
   const ac          = lower(extractText(fields.customfield_10016) || extractText(fields.customfield_10014) || "");
   const allText     = `${summary} ${description} ${ac}`;
 
-  // Determine applicable test types
-  const testTypes = Object.entries(TYPE_SIGNALS)
-    .filter(([, keywords]) => keywords.some(k => allText.includes(k)))
-    .map(([type]) => type);
+  // ── Weighted score aggregation per category ─────────────────────
+  const categoryScores = {};
+  const matchedKeywords = []; // for decision log
+
+  for (const entry of WEIGHTED_KEYWORDS) {
+    if (allText.includes(entry.keyword)) {
+      const s = entry.weight;
+      categoryScores[entry.category] = (categoryScores[entry.category] || 0) + s;
+      matchedKeywords.push({ keyword: entry.keyword, weight: s, category: entry.category });
+    }
+  }
+
+  // Score-to-confidence normalisation: max possible per category is unbounded; we scale
+  // by the category's own top score so the strongest category is always 1.0.
+  const scoreValues = Object.values(categoryScores);
+  const topScore = scoreValues.length > 0 ? Math.max(...scoreValues) : 0;
+
+  // A category is "selected" if its normalised confidence >= CONFIDENCE_THRESHOLD
+  const confThreshold = parseFloat(
+    process.env.AGENT_CONFIDENCE_THRESHOLD || '0.4'
+  );
+
+  const scoredCategories = Object.entries(categoryScores).map(([cat, s]) => ({
+    category:   cat,
+    score:      s,
+    confidence: topScore > 0 ? +(s / topScore).toFixed(3) : 0
+  }));
+  scoredCategories.sort((a, b) => b.score - a.score);
+
+  const testTypes = scoredCategories
+    .filter(x => x.confidence >= confThreshold)
+    .map(x => x.category);
   if (testTypes.length === 0) testTypes.push("Happy Path", "Negative");
 
-  // Determine applicable design techniques
+  // Overall plan confidence: mean of top-3 confidences (or 0 if nothing matched)
+  const topThree = scoredCategories.slice(0, 3);
+  const overallConfidence = topThree.length > 0
+    ? +((topThree.reduce((a, b) => a + b.confidence, 0) / topThree.length).toFixed(3))
+    : 0;
+
+  // ── Design techniques (kept simple: still keyword-based) ────────
   const designTechniques = Object.entries(TECHNIQUE_SIGNALS)
     .filter(([, keywords]) => keywords.some(k => allText.includes(k)))
     .map(([technique]) => technique);
   if (designTechniques.length === 0) designTechniques.push("Equivalence Partitioning", "Error Guessing");
 
-  // Identify risks
+  // ── Risks ──────────────────────────────────────────────────────
   const risks = RISK_SIGNALS
     .filter(r => allText.includes(r.keyword))
     .map(r => r.risk);
@@ -113,29 +238,48 @@ async function plan(story) {
     `Verify UI feedback (success/error messages) is correct`
   ];
 
-  // ── Contextual augmentation: deeper scenarios & risks (no external API) ──
   const augmented = augmentPlan(fields, allText, testTypes, designTechniques);
-  for (const s of augmented.criticalScenarios) {
-    if (!criticalScenarios.includes(s)) criticalScenarios.push(s);
-  }
-  for (const r of augmented.risks) {
-    if (!risks.includes(r)) risks.push(r);
-  }
-  for (const t of augmented.additionalTestTypes) {
-    if (!testTypes.includes(t)) testTypes.push(t);
-  }
+  for (const s of augmented.criticalScenarios) if (!criticalScenarios.includes(s)) criticalScenarios.push(s);
+  for (const r of augmented.risks)            if (!risks.includes(r))            risks.push(r);
+  for (const t of augmented.additionalTestTypes) if (!testTypes.includes(t))     testTypes.push(t);
 
   if (augmented.criticalScenarios.length + augmented.risks.length + augmented.additionalTestTypes.length > 0) {
     logger.info("Planner: contextual augmentation applied — additional insights merged into plan");
   }
 
-  return {
+  let output = {
     scope: `Test all aspects of: ${fields.summary || "story"}`,
     testTypes,
     designTechniques,
     criticalScenarios,
-    risks: risks.length > 0 ? risks : ["Unexpected system behaviour with boundary inputs"]
+    risks: risks.length > 0 ? risks : ["Unexpected system behaviour with boundary inputs"],
+    confidence: overallConfidence
   };
+
+  // ── Schema validation (non-throwing: sanitise on failure) ──────
+  const { valid, errors } = validatePlannerOutput(output);
+  if (!valid) {
+    logger.warn(`Planner output failed schema validation: ${errors.join('; ')} — sanitising`);
+    output = sanitizePlannerOutput(output);
+  }
+
+  // ── Decision logging ──────────────────────────────────────────
+  logDecision('planner', {
+    storyKey:   story.key || fields.issuetype?.name || null,
+    title:      fields.summary || null,
+    wordCount:  allText.trim().split(/\s+/).length
+  }, {
+    testTypes,
+    designTechniques,
+    testTypeCount: testTypes.length,
+    overallConfidence
+  }, {
+    matchedKeywords:   matchedKeywords.slice(0, 50),
+    scoredCategories,
+    confidenceThreshold: confThreshold
+  });
+
+  return output;
 }
 
 // ── Contextual Plan Augmentation (rule-based NLP) ───────────────────

@@ -1,6 +1,8 @@
 'use strict';
 const { extractText } = require("./planner.agent");
 const logger = require("../utils/logger");
+const { logDecision } = require("./agentDecisionLog");
+const { validateQAOutput, sanitizeQAOutput } = require("../core/schemas");
 
 // ─── GWT step classifier ──────────────────────────────────────────────────────
 /**
@@ -452,7 +454,104 @@ async function generate(story, plan) {
     testCases.push(...dynamicCases);
   }
 
-  return testCases;
+  // ── Fallback: low planner confidence → ensure minimal safety net ──
+  // If the planner signalled low confidence (< AGENT_CONFIDENCE_THRESHOLD) OR
+  // the template/dynamic generators somehow produced nothing, we must still
+  // emit at least one Happy Path, one Negative and one Boundary test case.
+  const confThreshold = parseFloat(process.env.AGENT_CONFIDENCE_THRESHOLD || '0.4');
+  const plannerConfidence = (plan && typeof plan.confidence === 'number') ? plan.confidence : 1;
+  const lowConfidence = plannerConfidence < confThreshold;
+
+  const hasTag = (tag) => testCases.some(tc => (tc.tags || []).includes(tag));
+  if (lowConfidence || testCases.length === 0) {
+    logger.warn(`QA: planner confidence ${plannerConfidence} below threshold ${confThreshold} — injecting safety-net test cases`);
+    if (!hasTag('happy-path')) {
+      testCases.push({
+        title: `[Fallback] Verify ${subject} completes successfully with valid inputs`,
+        description: `Safety-net happy-path test generated due to low planner confidence (${plannerConfidence}).`,
+        designTechnique: 'Equivalence Partitioning (EP) — Valid partition',
+        steps: [
+          `[Pre-condition] User is authenticated with sufficient permissions.`,
+          `Navigate to the ${subject} entry point.`,
+          `Provide all required inputs with valid data.`,
+          `Submit the action and observe the system response.`,
+          `Verify the success path is reached without errors.`
+        ],
+        expected: `The ${subject} operation completes successfully; success feedback is shown; data is persisted.`,
+        priority: 'High',
+        tags: ['happy-path', 'smoke', 'fallback']
+      });
+    }
+    if (!hasTag('negative')) {
+      testCases.push({
+        title: `[Fallback] Verify ${subject} rejects invalid inputs gracefully`,
+        description: `Safety-net negative test generated due to low planner confidence.`,
+        designTechnique: 'Error Guessing (EG)',
+        steps: [
+          `[Pre-condition] User is authenticated.`,
+          `Navigate to the ${subject} entry point.`,
+          `Provide invalid or malformed inputs (e.g. empty fields, special characters, overlong strings).`,
+          `Submit and verify validation errors are shown without any server crash.`,
+          `Verify no partial record or side effect is persisted.`
+        ],
+        expected: `The system displays clear validation errors, prevents submission, and does not persist invalid data.`,
+        priority: 'High',
+        tags: ['negative', 'fallback']
+      });
+    }
+    if (!hasTag('boundary') && !hasTag('bva')) {
+      testCases.push({
+        title: `[Fallback] Verify ${subject} handles boundary values correctly`,
+        description: `Safety-net boundary test generated due to low planner confidence.`,
+        designTechnique: 'Boundary Value Analysis (BVA)',
+        steps: [
+          `[Pre-condition] User is authenticated.`,
+          `Identify an input with a documented numeric or length boundary.`,
+          `Submit with value at the lower boundary and verify acceptance.`,
+          `Submit with value at the upper boundary and verify acceptance.`,
+          `Submit with value one beyond the upper boundary and verify rejection.`
+        ],
+        expected: `Boundary-valid values are accepted and just-over-boundary values are rejected with a clear message.`,
+        priority: 'Normal',
+        tags: ['boundary', 'bva', 'fallback']
+      });
+    }
+  }
+
+  // Attach GWT to any cases added after the initial map (e.g. fallback ones)
+  testCases.forEach(tc => {
+    if (!Array.isArray(tc.gwt) || tc.gwt.length === 0) {
+      tc.gwt = stepsToGWT(tc.steps || []);
+    }
+  });
+
+  // ── Schema validation (non-throwing: sanitise on failure) ─────────
+  let output = testCases;
+  const { valid, errors } = validateQAOutput(output);
+  if (!valid) {
+    logger.warn(`QA output failed schema validation: ${errors.slice(0, 5).join('; ')}${errors.length > 5 ? '…' : ''} — sanitising`);
+    output = sanitizeQAOutput(output);
+  }
+
+  // ── Decision log ──────────────────────────────────────────────────
+  const priorityCount = output.reduce((acc, tc) => {
+    acc[tc.priority] = (acc[tc.priority] || 0) + 1; return acc;
+  }, {});
+  logDecision('qa', {
+    storyKey:  story.key || null,
+    title:     fields.summary || null,
+    wordCount: allText.trim().split(/\s+/).length
+  }, {
+    testCaseCount:  output.length,
+    priorityCount,
+    fallbackApplied: lowConfidence || testCases.length === 0
+  }, {
+    plannerConfidence,
+    confidenceThreshold: confThreshold,
+    techniquesApplied: techniques
+  });
+
+  return output;
 }
 
 // ── Dynamic Test Case Generator (rule-based gap analysis) ────────────

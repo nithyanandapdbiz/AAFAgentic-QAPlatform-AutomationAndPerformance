@@ -12,6 +12,8 @@
  * No external API dependencies — uses multi-layer tag/keyword/context analysis.
  */
 const logger = require("../utils/logger");
+const { logDecision } = require("./agentDecisionLog");
+const { validateRiskPrioritizerOutput, sanitizeRiskPrioritizerOutput } = require("../core/schemas");
 
 // ── Scoring weights and tag → dimension mappings ─────────────────────
 const PRIORITY_BASE = { High: 8, Normal: 5, Low: 3 };
@@ -115,7 +117,11 @@ function scoreTestCase(tc, storyText) {
 }
 
 async function prioritize(testCases, story) {
-  if (!testCases || testCases.length === 0) return testCases;
+  const inputCount = Array.isArray(testCases) ? testCases.length : 0;
+  if (!testCases || testCases.length === 0) {
+    logDecision('riskPrioritizer', { inputCount, storyKey: story?.key || null }, { outputCount: 0 }, { note: 'empty input' });
+    return testCases;
+  }
 
   const fields = story?.fields || {};
   const summary = fields.summary || "";
@@ -146,7 +152,28 @@ async function prioritize(testCases, story) {
     logger.info(`  ${i + 1}. [Risk: ${tc.riskScore.compositeRisk}/10] ${tc.title} — ${tc.riskScore.reasoning}`);
   });
 
-  return scored;
+  let output = scored;
+  const { valid, errors } = validateRiskPrioritizerOutput(output);
+  if (!valid) {
+    logger.warn(`RiskPrioritizer output failed schema validation: ${errors.slice(0, 5).join('; ')} — sanitising`);
+    output = sanitizeRiskPrioritizerOutput(output);
+  }
+
+  const priorityCount = output.reduce((acc, tc) => {
+    acc[tc.priority] = (acc[tc.priority] || 0) + 1; return acc;
+  }, {});
+  logDecision('riskPrioritizer', {
+    inputCount,
+    storyKey: story?.key || null
+  }, {
+    outputCount: output.length,
+    priorityCount,
+    topRisk: output[0] ? output[0].riskScore.compositeRisk : 0
+  }, {
+    top3: output.slice(0, 3).map(tc => ({ title: tc.title, compositeRisk: tc.riskScore.compositeRisk }))
+  });
+
+  return output;
 }
 
 module.exports = { prioritize };

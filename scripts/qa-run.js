@@ -1,5 +1,10 @@
 'use strict';
 /**
+ * @deprecated Use `node scripts/run-full-pipeline.js --use-runner` (preset: functional)
+ *             or call `require('../src/pipeline/runner').runPipeline(PRESETS.functional, ctx)` directly.
+ *             This script is kept for backward compatibility with existing automation and will be
+ *             removed in a future major release.
+ *
  * qa-run.js  —  Single-command, zero-prompt, end-to-end QA pipeline
  * ─────────────────────────────────────────────────────────────────────────────
  * Runs nine pipeline stages in sequence with no human input:

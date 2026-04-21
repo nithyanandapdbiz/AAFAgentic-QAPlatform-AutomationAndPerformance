@@ -58,4 +58,67 @@ async function mapResults(cycleKey, testCaseRefs, results, story) {
     }
   }
 }
-module.exports = { mapResults };
+module.exports = { mapResults, validateMapping };
+
+/**
+ * validateMapping — quick sanity check that a story has usable Zephyr
+ * test cases before the executor attempts to create executions.
+ *
+ * Looks up test cases via GET /testcases?projectKey=&folderId= (or by Jira
+ * issueLinks). Returns structured outcome so callers can halt the pipeline
+ * early when the mapping is clearly broken.
+ *
+ * @param {string} storyKey   - e.g. "SCRUM-6"
+ * @returns {Promise<{valid:boolean, testCaseCount:number, missingKeys:string[], reason?:string}>}
+ */
+async function validateMapping(storyKey) {
+  if (!storyKey || typeof storyKey !== 'string') {
+    return { valid: false, testCaseCount: 0, missingKeys: [], reason: 'storyKey is required' };
+  }
+
+  // We don't have a direct "test cases for story" endpoint in all Zephyr tiers.
+  // Instead we read the handoff file produced by scripts/run-story.js which
+  // enumerates exactly the keys created/linked for this story in this run.
+  const fs   = require('fs');
+  const path = require('path');
+  const handoff = path.resolve(process.cwd(), '.story-testcases.json');
+
+  if (!fs.existsSync(handoff)) {
+    return {
+      valid:         false,
+      testCaseCount: 0,
+      missingKeys:   [],
+      reason:        'No .story-testcases.json handoff file — run scripts/run-story.js first.'
+    };
+  }
+
+  let payload;
+  try { payload = JSON.parse(fs.readFileSync(handoff, 'utf8')); }
+  catch (e) { return { valid: false, testCaseCount: 0, missingKeys: [], reason: `handoff parse error: ${e.message}` }; }
+
+  const keys = Array.isArray(payload?.keys) ? payload.keys : [];
+  if (keys.length === 0) {
+    return {
+      valid:         false,
+      testCaseCount: 0,
+      missingKeys:   [],
+      reason:        `handoff file has no test case keys for story ${storyKey}`
+    };
+  }
+
+  // Verify each key has a corresponding spec file (tests/specs/<KEY>_*.spec.js)
+  const specsDir = path.resolve(process.cwd(), 'tests', 'specs');
+  const specFiles = fs.existsSync(specsDir) ? fs.readdirSync(specsDir) : [];
+  const missingKeys = keys.filter(k =>
+    !specFiles.some(f => f.toUpperCase().startsWith(String(k).toUpperCase() + '_'))
+  );
+
+  return {
+    valid:         missingKeys.length === 0,
+    testCaseCount: keys.length,
+    missingKeys,
+    reason:        missingKeys.length === 0
+      ? undefined
+      : `${missingKeys.length} test case(s) have no spec file in tests/specs/`
+  };
+}

@@ -5,6 +5,7 @@ const { handleJiraWebhook, handleManualTrigger, getWebhookStatus } = require("./
 const { listAll, getSummary, listByTest, serveScreenshot } = require("./screenshot.controller");
 const { getSecuritySummary } = require("./security.controller");
 const { getPerfSummary } = require("./perf.controller");
+const { getAgentDecisions } = require("./agentDecisions.controller");
 
 const router = express.Router();
 
@@ -38,5 +39,9 @@ router.get("/security/summary",        getSecuritySummary);  // Latest security 
 
 // ── Performance ───────────────────────────────────────────────────
 router.get("/perf/summary",            getPerfSummary);      // Latest performance test summary
+
+// ── Agent Decisions (observability) ───────────────────────────────
+// ?limit=N (1..200, default 50)  &  ?agentName=planner|qa|reviewer|riskPrioritizer|executor
+router.get("/agent-decisions",         authMiddleware, getAgentDecisions);
 
 module.exports = router;

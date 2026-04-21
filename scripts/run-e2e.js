@@ -1,5 +1,9 @@
 'use strict';
 /**
+ * @deprecated Use `node scripts/run-full-pipeline.js --use-runner --include-perf --include-security`
+ *             (preset: full) — the consolidated runner in `src/pipeline/runner.js`.
+ *             This script is kept for backward compatibility and will be removed in a future release.
+ *
  * run-e2e.js  —  Complete End-to-End QA Run
  * ─────────────────────────────────────────────────────────────────────────────
  * Single-command, zero-config entry point for the full 3-pillar QA journey:

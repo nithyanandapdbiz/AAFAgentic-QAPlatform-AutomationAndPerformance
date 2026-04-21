@@ -43,7 +43,7 @@ async function run(opts = {}) {
       return { perfRequired: false, scripts: [] };
     }
 
-    const { loadProfile, thresholds, testTypes } = result;
+    const { loadProfile, thresholds, thresholdsByType, testTypes } = result;
 
     // Filter to a single test type if requested
     const typesToGenerate = testType
@@ -52,17 +52,19 @@ async function run(opts = {}) {
 
     if (typesToGenerate.length === 0) {
       logger.warn(`[generate-perf-scripts] No matching test type for: ${testType}`);
-      return { perfRequired: true, scripts: [] };
+      return { perfRequired: true, scripts: [], thresholdsByType };
     }
 
     const scripts = [];
     for (const type of typesToGenerate) {
-      const scriptPath = generateK6Script(type, storyKey, loadProfile, thresholds, baseUrl);
+      // Use per-type thresholds if available, else fall back to global thresholds
+      const typeThresholds = thresholdsByType ? (thresholdsByType[type] || thresholds) : thresholds;
+      const scriptPath = generateK6Script(type, storyKey, loadProfile, typeThresholds, baseUrl, description);
       logger.info(`[generate-perf-scripts] Generated: ${scriptPath}`);
       scripts.push(scriptPath);
     }
 
-    return { perfRequired: true, scripts };
+    return { perfRequired: true, scripts, thresholdsByType };
   } catch (err) {
     if (err instanceof AppError) throw err;
     throw new AppError(`generate-perf-scripts failed: ${err.message}`);

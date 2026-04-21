@@ -22,61 +22,73 @@ function extractText(node) {
 
 /**
  * Build the stages array for a given test type.
+ * Warm-up stage (30s, 1 VU) is prepended for load/stress/soak/scalability.
  * @param {string} type
  * @param {object} loadProfile
  * @returns {Array<{duration:string, target:number}>}
  */
 function buildStages(type, loadProfile) {
   const { vus, duration, rampUpTime, rampDownTime } = loadProfile;
+  const soakDuration = process.env.PERF_SOAK_DURATION || '30m';
+  const warmup = { duration: '30s', target: 1 };
 
   switch (type) {
     case 'load':
       return [
-        { duration: rampUpTime,   target: vus },
-        { duration: duration,     target: vus },
-        { duration: rampDownTime, target: 0   },
+        warmup,
+        { duration: '2m',          target: vus },
+        { duration: '5m',          target: vus },
+        { duration: '1m',          target: 0   },
       ];
     case 'stress':
       return [
-        { duration: rampUpTime,   target: vus * 2 },
-        { duration: duration,     target: vus * 2 },
-        { duration: rampDownTime, target: 0        },
+        warmup,
+        { duration: '3m',          target: vus     },
+        { duration: '5m',          target: vus     },
+        { duration: '2m',          target: vus * 2 },
+        { duration: '3m',          target: vus * 2 },
+        { duration: '2m',          target: 0       },
       ];
     case 'spike':
+      // No warm-up for spike — must hit cold
       return [
-        { duration: '10s',        target: vus * 3 },
-        { duration: '1m',         target: vus * 3 },
-        { duration: '10s',        target: 0        },
+        { duration: '10s',         target: vus * 3 },
+        { duration: '1m',          target: vus * 3 },
+        { duration: '10s',         target: 0       },
       ];
-    case 'soak': {
-      const soakDuration = process.env.PERF_SOAK_DURATION || '30m';
+    case 'soak':
       return [
-        { duration: rampUpTime,   target: vus         },
-        { duration: soakDuration, target: vus         },
-        { duration: rampDownTime, target: 0           },
+        warmup,
+        { duration: '3m',          target: vus         },
+        { duration: soakDuration,  target: vus         },
+        { duration: rampDownTime,  target: 0           },
       ];
-    }
     case 'scalability': {
-      // Step ramp: 10% → 50% → 100% in equal intervals
-      const step10  = Math.max(1, Math.round(vus * 0.1));
-      const step50  = Math.max(1, Math.round(vus * 0.5));
+      const v10 = Math.max(1, Math.round(vus * 0.10));
+      const v25 = Math.max(1, Math.round(vus * 0.25));
+      const v50 = Math.max(1, Math.round(vus * 0.50));
+      const v75 = Math.max(1, Math.round(vus * 0.75));
       return [
-        { duration: rampUpTime,   target: step10 },
-        { duration: rampUpTime,   target: step50 },
-        { duration: duration,     target: vus    },
-        { duration: rampDownTime, target: 0      },
+        warmup,
+        { duration: '2m',          target: v10 },
+        { duration: '2m',          target: v25 },
+        { duration: '2m',          target: v50 },
+        { duration: '2m',          target: v75 },
+        { duration: '3m',          target: vus },
+        { duration: '1m',          target: 0   },
       ];
     }
     case 'breakpoint':
-      // Ramp from 1 VU upward by 10 every 1m — k6 will stop on error threshold
+      // Ramp from 1 → 2×VUs over 10 min; abortOnFail configured in script options
       return [
-        { duration: '10m', target: vus * 2 },
+        { duration: '10m',         target: vus * 2 },
       ];
     default:
       return [
-        { duration: rampUpTime,   target: vus },
-        { duration: duration,     target: vus },
-        { duration: rampDownTime, target: 0   },
+        warmup,
+        { duration: rampUpTime,    target: vus },
+        { duration: duration,      target: vus },
+        { duration: rampDownTime,  target: 0   },
       ];
   }
 }
@@ -144,13 +156,51 @@ async function analyze(story, plan) {
 
     const thresholds = { p95, p99, errorRate, throughputDropPct };
 
-    // ── 4. Test type mapper ─────────────────────────────────────────────────
+    // ── 4. Per-test-type threshold map ──────────────────────────────────────
+    // Each test type has different stress characteristics so thresholds are
+    // scaled accordingly. Breakpoint intentionally breaches — no enforcement.
+    const thresholdsByType = {
+      load: {
+        p95,
+        p99,
+        errorRate,
+      },
+      stress: {
+        p95:       Math.round(p95 * 1.5),
+        p99:       Math.round(p99 * 1.5),
+        errorRate: parseFloat((errorRate * 2).toFixed(6)),
+      },
+      spike: {
+        p95:       Math.round(p95 * 3),
+        p99:       Math.round(p99 * 3),
+        errorRate: 0.05,   // 5% errors acceptable during spike
+      },
+      soak: {
+        p95:       Math.round(p95 * 1.2),
+        p99:       Math.round(p99 * 1.2),
+        errorRate,
+      },
+      scalability: {
+        p95:       Math.round(p95 * 1.3),
+        p99:       Math.round(p99 * 1.3),
+        errorRate: parseFloat((errorRate * 1.5).toFixed(6)),
+      },
+      breakpoint: {
+        p95:       Infinity,
+        p99:       Infinity,
+        errorRate: Infinity,
+        note:      'breakpoint test — thresholds disabled by design',
+      },
+    };
+
+    // ── 5. Test type mapper ─────────────────────────────────────────────────
     const testTypes = ['load', 'stress', 'spike', 'soak', 'scalability', 'breakpoint'];
 
     const scenarioConfigs = {};
     for (const type of testTypes) {
       scenarioConfigs[type] = {
-        stages: buildStages(type, loadProfile),
+        stages:     buildStages(type, loadProfile),
+        thresholds: thresholdsByType[type],
       };
     }
 
@@ -159,7 +209,8 @@ async function analyze(story, plan) {
     return {
       perfRequired: true,
       loadProfile,
-      thresholds,
+      thresholds,       // global defaults (backward-compat)
+      thresholdsByType, // per-type SLA map
       testTypes,
       scenarioConfigs,
       slaSource,

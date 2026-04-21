@@ -1,0 +1,212 @@
+name: Scoped QA (Proactive Heal + Targeted Run)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Triggers on PR and push to main. Runs proactive impact analysis, applies any
+# structural heal required, then executes the affected specs (story / tag /
+# full). Finally posts a consolidated summary on the PR and to the job summary.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: 'story | tag | full'
+        required: false
+        default: 'story'
+      issue_key:
+        description: 'Jira story key (for story scope)'
+        required: false
+      tag:
+        description: 'Playwright tag (for tag scope)'
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  scoped-execution:
+    name: Scoped Execution
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      BASE_URL:          https://opensource-demo.orangehrmlive.com
+      ZEPHYR_BASE_URL:   ${{ secrets.ZEPHYR_BASE_URL }}
+      ZEPHYR_ACCESS_KEY: ${{ secrets.ZEPHYR_ACCESS_KEY }}
+      JIRA_URL:          ${{ secrets.JIRA_URL }}
+      JIRA_API_TOKEN:    ${{ secrets.JIRA_API_TOKEN }}
+      JIRA_EMAIL:        ${{ secrets.JIRA_EMAIL }}
+      PROJECT_KEY:       ${{ secrets.PROJECT_KEY }}
+      ISSUE_KEY:         ${{ github.event.inputs.issue_key || secrets.ISSUE_KEY }}
+
+    steps:
+      - name: Checkout (full history for git diff)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      # ─────────────────────────────────────────────────────────────────
+      # Proactive heal — detect UI-layer changes and repair BEFORE run
+      # ─────────────────────────────────────────────────────────────────
+      - name: Proactive heal (detect + repair before run)
+        id: proactive-heal
+        env:
+          BASE_URL: https://opensource-demo.orangehrmlive.com
+          ZEPHYR_BASE_URL:   ${{ secrets.ZEPHYR_BASE_URL }}
+          ZEPHYR_ACCESS_KEY: ${{ secrets.ZEPHYR_ACCESS_KEY }}
+          JIRA_URL:          ${{ secrets.JIRA_URL }}
+          JIRA_API_TOKEN:    ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_EMAIL:        ${{ secrets.JIRA_EMAIL }}
+          GITHUB_BASE_REF:   ${{ github.base_ref }}
+        run: |
+          node scripts/analyse-impact.js
+          AFFECTED=$(cat impact-manifest.json | jq '.affectedTestKeys | length')
+          PAGES=$(cat impact-manifest.json | jq '.affectedPages | length')
+          SPECS=$(cat impact-manifest.json | jq '.affectedSpecFiles | length')
+          echo "affected_count=$AFFECTED" >> $GITHUB_OUTPUT
+          echo "affected_pages=$PAGES"    >> $GITHUB_OUTPUT
+          echo "affected_specs=$SPECS"    >> $GITHUB_OUTPUT
+          if [ "$AFFECTED" -gt "0" ]; then
+            echo "Proactive heal needed for $AFFECTED test(s)"
+            node scripts/proactive-healer.js --skip-run
+            # Collect light-weight counters for the summary step
+            LOC_HEAL=$(node -e "const m=require('./impact-manifest.json'); let n=0; for (const p of (m.affectedPages||[])) n += Object.keys(p.currentLocators||{}).length; console.log(n);")
+            echo "locator_pool=$LOC_HEAL" >> $GITHUB_OUTPUT
+          else
+            echo "No UI-layer changes detected — skipping proactive heal"
+            echo "locator_pool=0" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload impact manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: impact-manifest
+          path: impact-manifest.json
+          if-no-files-found: ignore
+
+      # ─────────────────────────────────────────────────────────────────
+      # Scoped execution — story / tag / full (choose exactly one)
+      # ─────────────────────────────────────────────────────────────────
+      - name: Execute — story scope
+        if: ${{ github.event.inputs.scope == 'story' || github.event_name != 'workflow_dispatch' }}
+        continue-on-error: true
+        run: node scripts/run-story-tests.js --headless
+
+      - name: Execute — tag scope
+        if: ${{ github.event.inputs.scope == 'tag' }}
+        continue-on-error: true
+        run: node scripts/run-tagged-tests.js --tag "${{ github.event.inputs.tag || 'smoke' }}" --headless
+
+      - name: Execute — full scope
+        if: ${{ github.event.inputs.scope == 'full' }}
+        continue-on-error: true
+        run: node scripts/run-full-pipeline.js --headless --skip-git
+
+      # ─────────────────────────────────────────────────────────────────
+      # Reporting — GITHUB_STEP_SUMMARY + PR comment
+      # ─────────────────────────────────────────────────────────────────
+      - name: Build job summary
+        if: always()
+        run: |
+          HEAL_AFFECTED="${{ steps.proactive-heal.outputs.affected_count || '0' }}"
+          HEAL_PAGES="${{ steps.proactive-heal.outputs.affected_pages || '0' }}"
+          HEAL_SPECS="${{ steps.proactive-heal.outputs.affected_specs || '0' }}"
+
+          {
+            echo "## Scoped QA — Summary"
+            echo ""
+            echo "| Area | Value |"
+            echo "| --- | --- |"
+            echo "| Proactive heal — affected pages       | ${HEAL_PAGES} |"
+            echo "| Proactive heal — affected test cases  | ${HEAL_AFFECTED} |"
+            echo "| Proactive heal — affected spec files  | ${HEAL_SPECS} |"
+            if [ -f test-results-healed.json ]; then
+              PASSED=$(jq '.stats.expected // 0'  test-results-healed.json)
+              FAILED=$(jq '.stats.unexpected // 0' test-results-healed.json)
+              echo "| Healed specs re-run — passed          | ${PASSED} |"
+              echo "| Healed specs re-run — failed          | ${FAILED} |"
+            fi
+            if [ -f test-results.json ]; then
+              PASSED=$(jq '.stats.expected // 0'  test-results.json)
+              FAILED=$(jq '.stats.unexpected // 0' test-results.json)
+              echo "| Scoped run — passed                   | ${PASSED} |"
+              echo "| Scoped run — failed                   | ${FAILED} |"
+            fi
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload Playwright artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-results
+          path: |
+            test-results.json
+            test-results-healed.json
+            playwright-report/
+            custom-report/
+          if-no-files-found: ignore
+
+      - name: Commit healed artefacts
+        if: github.event_name == 'push' && steps.proactive-heal.outputs.affected_count != '0'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tests/pages/*.yml tests/specs/*.spec.js tests/healed/ impact-manifest.json || true
+          git diff --cached --quiet || git commit -m "heal(proactive): auto-patch selectors/specs/Zephyr [skip ci]"
+          git push origin HEAD || true
+
+      - name: Post PR comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const healAffected = '${{ steps.proactive-heal.outputs.affected_count || '0' }}';
+            const healPages    = '${{ steps.proactive-heal.outputs.affected_pages || '0' }}';
+            const healSpecs    = '${{ steps.proactive-heal.outputs.affected_specs || '0' }}';
+            let passed = '0', failed = '0';
+            try {
+              if (fs.existsSync('test-results.json')) {
+                const r = JSON.parse(fs.readFileSync('test-results.json', 'utf8'));
+                passed = String(r.stats?.expected   ?? 0);
+                failed = String(r.stats?.unexpected ?? 0);
+              }
+            } catch (_) {}
+            const body = [
+              '### Scoped QA — Summary',
+              '',
+              '| Area | Value |',
+              '| --- | --- |',
+              `| Proactive heal — affected pages      | ${healPages} |`,
+              `| Proactive heal — affected test cases | ${healAffected} |`,
+              `| Proactive heal — specs auto-updated  | ${healSpecs} |`,
+              `| Scoped run — passed                  | ${passed} |`,
+              `| Scoped run — failed                  | ${failed} |`,
+              '',
+              '_Artifacts: `impact-manifest`, `playwright-results`._',
+            ].join('\n');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
