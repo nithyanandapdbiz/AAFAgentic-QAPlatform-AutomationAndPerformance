@@ -101,7 +101,7 @@ async function startZap(zapConfig) {
     } catch { /* not running yet */ }
 
     if (process.env.ZAP_DOCKER !== 'true') {
-      logger.warn('[ZAP] ZAP not reachable and ZAP_DOCKER is not true — skipping ZAP start');
+      logger.info('[ZAP] ZAP not reachable and ZAP_DOCKER is not true — ZAP scan will be skipped');
       return { started: false, version: 'unavailable' };
     }
 
@@ -184,6 +184,25 @@ async function runZapScan(zapConfig) {
     );
     logger.info('[ZAP] Spider complete');
 
+    // Optional AJAX spider for JavaScript-rendered content
+    if (zapConfig.ajaxSpider) {
+      logger.info('[ZAP] Starting AJAX spider (max 2 min)...');
+      try {
+        await httpPost(zapUrl('/JSON/ajaxSpider/action/scan/'), `apikey=${key}&url=${url}&inScope=false`);
+        const ajaxStart = Date.now();
+        while (Date.now() - ajaxStart < 120000) {
+          await new Promise(r => setTimeout(r, 4000));
+          try {
+            const st = await httpGet(zapUrl(`/JSON/ajaxSpider/view/status/?apikey=${key}`));
+            if (JSON.parse(st.body || '{}').status === 'stopped') break;
+          } catch { /* not ready */ }
+        }
+        logger.info('[ZAP] AJAX spider complete');
+      } catch (e) {
+        logger.info(`[ZAP] AJAX spider skipped: ${e.message}`);
+      }
+    }
+
     // Active scan or passive scan
     if (zapConfig.scanType === 'full' || zapConfig.scanType === 'api') {
       logger.info('[ZAP] Starting active scan...');
@@ -248,6 +267,37 @@ async function stopZap() {
     }
   } catch (err) {
     logger.warn(`[ZAP] stopZap error (non-fatal): ${err.message}`);
+  }
+}
+
+// ─── Authenticated session ────────────────────────────────────────────────────
+
+/**
+ * Logs in to the application and returns a session cookie string for authenticated scans.
+ * @param {string} targetUrl
+ * @returns {string} Cookie string (may be empty if login fails)
+ */
+async function getAuthSession(targetUrl) {
+  try {
+    const loginPage = await httpGet(`${targetUrl}/web/index.php/auth/login`);
+    const preCookie = buildCookieString(loginPage.headers['set-cookie']);
+    const body = 'txtUsername=Admin&txtPassword=admin123';
+    const loginRes = await httpPost(
+      `${targetUrl}/web/index.php/auth/validateCredentials`,
+      body,
+      { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: preCookie }
+    );
+    const postCookie = buildCookieString(loginRes.headers['set-cookie']);
+    const session = postCookie || preCookie;
+    if (session) {
+      logger.info('[SecExecution] Auth session established successfully');
+    } else {
+      logger.info('[SecExecution] Auth login returned no session cookie — continuing unauthenticated');
+    }
+    return session;
+  } catch (err) {
+    logger.info(`[SecExecution] Auth session unavailable: ${err.message} — continuing unauthenticated`);
+    return '';
   }
 }
 
@@ -502,18 +552,211 @@ async function checkBrokenAuthBruteForce(targetUrl) {
   };
 }
 
+// ─── 8 Additional OWASP custom checks ────────────────────────────────────────
+
+async function checkHttpMethodsAllowed(targetUrl) {
+  const res = await safeGet(targetUrl);
+  const allowHeader = res.headers['allow'] || res.headers['access-control-allow-methods'] || '';
+  const dangerousMethods = ['TRACE', 'PUT', 'DELETE', 'CONNECT'];
+  const found = dangerousMethods.filter(m => allowHeader.toUpperCase().includes(m));
+  // Also probe TRACE directly
+  let traceReflected = false;
+  try {
+    const traceRes = await new Promise(resolve => {
+      const u = new URL(targetUrl);
+      const mod2 = u.protocol === 'https:' ? https : http;
+      const req = mod2.request({
+        hostname: u.hostname, port: u.port || (u.protocol === 'https:' ? 443 : 80),
+        path: u.pathname || '/', method: 'TRACE',
+        headers: { 'X-Custom-Probe': 'zapprobe-trace' },
+      }, r => { let b = ''; r.on('data', d => b += d); r.on('end', () => resolve({ statusCode: r.statusCode, body: b })); });
+      req.setTimeout(5000, () => { req.destroy(); resolve({ statusCode: 0, body: '' }); });
+      req.on('error', () => resolve({ statusCode: 0, body: '' }));
+      req.end();
+    });
+    traceReflected = traceRes.statusCode === 200 && traceRes.body.includes('X-Custom-Probe');
+  } catch { /* ignore */ }
+  const passed = found.length === 0 && !traceReflected;
+  return {
+    name:        'http-methods-allowed',
+    passed,
+    severity:    passed ? 'informational' : 'medium',
+    cvss:        passed ? 0 : 5.3,
+    owaspId:     'A05:2021',
+    description: passed
+      ? 'No dangerous HTTP methods detected'
+      : `Dangerous HTTP methods: ${[...found, ...(traceReflected ? ['TRACE (reflected)'] : [])].join(', ')}`,
+    evidence:    allowHeader ? `Allow: ${allowHeader}` : (traceReflected ? 'TRACE reflected back' : ''),
+  };
+}
+
+async function checkServerVersionDisclosure(targetUrl) {
+  const res = await safeGet(targetUrl);
+  const server  = res.headers['server'] || '';
+  const powered = res.headers['x-powered-by'] || '';
+  const leaksServer  = /[\d]+\.[\d]+/.test(server);
+  const leaksPowered = powered.length > 0;
+  const passed = !leaksServer && !leaksPowered;
+  return {
+    name:        'server-version-disclosure',
+    passed,
+    severity:    passed ? 'informational' : 'low',
+    cvss:        passed ? 0 : 3.7,
+    owaspId:     'A05:2021',
+    description: passed
+      ? 'No server version information disclosed'
+      : 'Server version/technology disclosed — assists attacker reconnaissance',
+    evidence:    [server && `Server: ${server}`, powered && `X-Powered-By: ${powered}`].filter(Boolean).join(' | '),
+  };
+}
+
+async function checkCorsMisconfiguration(targetUrl) {
+  const res  = await safeGet(targetUrl, { Origin: 'https://evil.com' });
+  const acao = res.headers['access-control-allow-origin'] || '';
+  const acac = (res.headers['access-control-allow-credentials'] || '').toLowerCase();
+  const reflectsEvil = acao === 'https://evil.com';
+  const allowsCreds  = acac === 'true';
+  const passed = !(reflectsEvil && allowsCreds);
+  return {
+    name:        'cors-misconfiguration',
+    passed,
+    severity:    passed ? 'informational' : 'high',
+    cvss:        passed ? 0 : 7.5,
+    owaspId:     'A05:2021',
+    description: passed
+      ? 'CORS policy does not allow arbitrary origins with credentials'
+      : 'CORS misconfiguration: arbitrary origin reflected with credentials allowed',
+    evidence:    `Access-Control-Allow-Origin: ${acao || '(none)'} | Allow-Credentials: ${acac || '(none)'}`,
+  };
+}
+
+async function checkClickjackingProtection(targetUrl) {
+  const res = await safeGet(targetUrl);
+  const xfo = res.headers['x-frame-options'] || '';
+  const csp = res.headers['content-security-policy'] || '';
+  const passed = /DENY|SAMEORIGIN/i.test(xfo) || /frame-ancestors/i.test(csp);
+  return {
+    name:        'clickjacking-protection',
+    passed,
+    severity:    passed ? 'informational' : 'medium',
+    cvss:        passed ? 0 : 4.3,
+    owaspId:     'A05:2021',
+    description: passed
+      ? 'Clickjacking protection present (X-Frame-Options or CSP frame-ancestors)'
+      : 'Missing clickjacking protection — page can be embedded in an attacker iframe',
+    evidence:    xfo ? `X-Frame-Options: ${xfo}` : (csp ? `CSP: ${csp.slice(0, 80)}` : 'No X-Frame-Options or frame-ancestors found'),
+  };
+}
+
+async function checkDirectoryTraversal(targetUrl) {
+  const payloads = [
+    `${targetUrl}/web/index.php/../../../etc/passwd`,
+    `${targetUrl}/web/index.php?file=../../../etc/passwd`,
+    `${targetUrl}/web/..%2F..%2F..%2Fetc%2Fpasswd`,
+  ];
+  for (const url of payloads) {
+    const res = await safeGet(url);
+    if (res.statusCode === 200 && /root:|nobody:|daemon:/i.test(res.body)) {
+      return {
+        name: 'directory-traversal-signal', passed: false, severity: 'critical', cvss: 9.1,
+        owaspId: 'A01:2021',
+        description: 'Directory traversal: /etc/passwd content returned',
+        evidence: `URL: ${url} | Snippet: ${res.body.slice(0, 100)}`,
+      };
+    }
+  }
+  return { name: 'directory-traversal-signal', passed: true, severity: 'informational', cvss: 0, owaspId: 'A01:2021', description: 'No directory traversal detected', evidence: '' };
+}
+
+async function checkUserEnumeration(targetUrl) {
+  const loginUrl = `${targetUrl}/web/index.php/auth/validateCredentials`;
+  const h = { 'Content-Type': 'application/x-www-form-urlencoded' };
+  const validRes   = await safePost(loginUrl, 'txtUsername=Admin&txtPassword=wrongpassword', h);
+  const invalidRes = await safePost(loginUrl, 'txtUsername=nonexistentuser99999&txtPassword=wrongpassword', h);
+  const bodyDiff   = Math.abs((validRes.body || '').length - (invalidRes.body || '').length);
+  const statusDiff = validRes.statusCode !== invalidRes.statusCode;
+  const vuln = statusDiff || bodyDiff > 50;
+  return {
+    name:        'user-enumeration',
+    passed:      !vuln,
+    severity:    vuln ? 'medium' : 'informational',
+    cvss:        vuln ? 5.3 : 0,
+    owaspId:     'A07:2021',
+    description: vuln
+      ? `User enumeration possible: different responses for valid vs invalid username (status diff: ${statusDiff}, body diff: ${bodyDiff}B)`
+      : 'Consistent responses for valid and invalid usernames',
+    evidence:    `Valid → ${validRes.statusCode} (${(validRes.body||'').length}B) | Invalid → ${invalidRes.statusCode} (${(invalidRes.body||'').length}B)`,
+  };
+}
+
+async function checkPasswordPolicyEnforcement(targetUrl) {
+  const changePageRes = await safeGet(`${targetUrl}/web/index.php/pim/updatePasswordPage`);
+  const hasPolicy = /minlength|min-length|minimum.*password|password.*must|at least/i.test(changePageRes.body);
+  const resetRes  = await safePost(
+    `${targetUrl}/web/index.php/auth/sendPasswordReset`,
+    'email=admin@example.com',
+    { 'Content-Type': 'application/x-www-form-urlencoded' }
+  );
+  return {
+    name:        'password-policy-enforcement',
+    passed:      hasPolicy,
+    severity:    hasPolicy ? 'informational' : 'low',
+    cvss:        hasPolicy ? 0 : 3.1,
+    owaspId:     'A07:2021',
+    description: hasPolicy
+      ? 'Password policy enforcement indicators found'
+      : 'No password policy enforcement found in UI — weak passwords may be accepted',
+    evidence:    `Password reset endpoint → HTTP ${resetRes.statusCode}`,
+  };
+}
+
+async function checkInformationDisclosureErrors(targetUrl) {
+  const probeUrls = [
+    `${targetUrl}/web/index.php/nonexistentpage`,
+    `${targetUrl}/web/index.php/pim/viewEmployeeList?empId=999999999`,
+    `${targetUrl}/api/nonexistent`,
+  ];
+  const STACK_PATTERNS = [
+    /stack trace|stacktrace/i,
+    /\.php on line \d+|Fatal error/i,
+    /Exception in thread|Traceback \(most/i,
+    /\/var\/www|\/home\/\w|C:\\inetpub|C:\\xampp/i,
+  ];
+  for (const url of probeUrls) {
+    const res = await safeGet(url);
+    const found = STACK_PATTERNS.filter(p => p.test(res.body));
+    if (found.length > 0) {
+      return {
+        name: 'information-disclosure-errors', passed: false, severity: 'medium', cvss: 5.3,
+        owaspId: 'A05:2021',
+        description: 'Stack trace or internal path disclosed in error response',
+        evidence: `URL: ${url} | Patterns: ${found.map(p => p.source).join(', ')}`,
+      };
+    }
+  }
+  return { name: 'information-disclosure-errors', passed: true, severity: 'informational', cvss: 0, owaspId: 'A05:2021', description: 'No stack traces or internal paths in error responses', evidence: '' };
+}
+
 // Registry of all custom checks
 const CUSTOM_CHECK_REGISTRY = {
-  'missing-security-headers':    (url, cookies) => checkMissingSecurityHeaders(url),
-  'insecure-cookie-flags':       (url, cookies) => checkInsecureCookieFlags(url),
-  'session-fixation':            (url, cookies) => checkSessionFixation(url),
-  'open-redirect':               (url, cookies) => checkOpenRedirect(url),
-  'sensitive-data-in-response':  checkSensitiveDataInResponse,
-  'csrf-token-absence':          checkCsrfTokenAbsence,
-  'idor-employee-id':            checkIdorEmployeeId,
-  'sql-injection-signal':        (url, cookies) => checkSqlInjectionSignal(url),
-  'xss-reflection-signal':       (url, cookies) => checkXssReflectionSignal(url),
-  'broken-auth-brute-force':     (url, cookies) => checkBrokenAuthBruteForce(url),
+  'missing-security-headers':       (url, cookies) => checkMissingSecurityHeaders(url),
+  'insecure-cookie-flags':          (url, cookies) => checkInsecureCookieFlags(url),
+  'session-fixation':               (url, cookies) => checkSessionFixation(url),
+  'open-redirect':                  (url, cookies) => checkOpenRedirect(url),
+  'sensitive-data-in-response':     checkSensitiveDataInResponse,
+  'csrf-token-absence':             checkCsrfTokenAbsence,
+  'idor-employee-id':               checkIdorEmployeeId,
+  'sql-injection-signal':           (url, cookies) => checkSqlInjectionSignal(url),
+  'xss-reflection-signal':          (url, cookies) => checkXssReflectionSignal(url),
+  'broken-auth-brute-force':        (url, cookies) => checkBrokenAuthBruteForce(url),
+  'http-methods-allowed':           (url, cookies) => checkHttpMethodsAllowed(url),
+  'server-version-disclosure':      (url, cookies) => checkServerVersionDisclosure(url),
+  'cors-misconfiguration':          (url, cookies) => checkCorsMisconfiguration(url),
+  'clickjacking-protection':        (url, cookies) => checkClickjackingProtection(url),
+  'directory-traversal-signal':     (url, cookies) => checkDirectoryTraversal(url),
+  'user-enumeration':               (url, cookies) => checkUserEnumeration(url),
+  'password-policy-enforcement':    (url, cookies) => checkPasswordPolicyEnforcement(url),
+  'information-disclosure-errors':  (url, cookies) => checkInformationDisclosureErrors(url),
 };
 
 // ─── runCustomChecks ─────────────────────────────────────────────────────────
@@ -580,7 +823,9 @@ function parseFindings(zapJsonPath, customResults = []) {
           return { findings: [], summary: { critical: 0, high: 0, medium: 0, low: 0, informational: 0 } };
         }
         const data = JSON.parse(raw);
-        const alerts = data.alerts || data.site?.[0]?.alerts || [];
+        // Collect alerts from ALL sites in the report (not just site[0])
+        const sites  = Array.isArray(data.site) ? data.site : (data.site ? [data.site] : []);
+        const alerts = data.alerts || sites.flatMap(s => Array.isArray(s.alerts) ? s.alerts : []);
         for (const alert of alerts) {
           findings.push({
             id:          `ZAP-${idCounter++}`,
@@ -774,6 +1019,7 @@ async function runFullScan(opts = {}) {
 }
 
 module.exports = {
+  getAuthSession,
   startZap,
   runZapScan,
   stopZap,

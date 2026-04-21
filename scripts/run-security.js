@@ -3,9 +3,65 @@
 
 require('dotenv').config();
 const fs     = require('fs');
+const http   = require('http');
 const path   = require('path');
+const { spawn } = require('child_process');
 const logger = require('../src/utils/logger');
 const AppError = require('../src/core/errorHandler');
+
+/** Quick TCP-level ping to ZAP API. Resolves true if ZAP responds within 3s. */
+function zapReachable() {
+  const zapUrl  = process.env.ZAP_API_URL || 'http://localhost:8080';
+  const apiKey  = process.env.ZAP_API_KEY  || 'changeme';
+  return new Promise(resolve => {
+    const req = http.get(
+      `${zapUrl}/JSON/core/view/version/?apikey=${encodeURIComponent(apiKey)}`,
+      res => { res.resume(); resolve(res.statusCode === 200); }
+    );
+    req.setTimeout(3000, () => { req.destroy(); resolve(false); });
+    req.on('error', () => resolve(false));
+  });
+}
+
+/**
+ * Attempts to auto-launch ZAP in daemon mode using ZAP_PATH.
+ * Polls until ZAP is reachable or timeout (90s).
+ * @returns {Promise<boolean>} true if ZAP becomes reachable
+ */
+async function launchZapDaemon() {
+  const zapPath = process.env.ZAP_PATH;
+  if (!zapPath || !fs.existsSync(zapPath)) {
+    logger.info('[ZAP] ZAP_PATH not set or file not found — cannot auto-launch');
+    return false;
+  }
+  const port   = (process.env.ZAP_API_URL || 'http://localhost:8080').replace(/.*:/, '');
+  const apiKey = process.env.ZAP_API_KEY || 'changeme';
+  logger.info(`[ZAP] Auto-launching ZAP daemon on port ${port}...`);
+  const child = spawn(zapPath, [
+    '-daemon',
+    '-host', '127.0.0.1',
+    '-port', port,
+    '-config', `api.key=${apiKey}`,
+    '-config', 'api.addrs.addr.name=.*',
+    '-config', 'api.addrs.addr.regex=true',
+  ], {
+    cwd:         path.dirname(zapPath), // zap.bat uses relative jar path — must run from its own dir
+    detached:    true,
+    stdio:       'ignore',
+    windowsHide: true,
+    shell:       true,  // required on Windows for .bat files
+  });
+  child.unref(); // do not block Node process
+
+  // Poll for up to 90 seconds
+  const deadline = Date.now() + 90000;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 4000));
+    if (await zapReachable()) return true;
+    logger.info('[ZAP] Waiting for ZAP to start...');
+  }
+  return false;
+}
 
 const ROOT = path.resolve(__dirname, '..');
 
@@ -69,32 +125,57 @@ async function main() {
   }
 
   // ── Stage 2 — Start ZAP ──────────────────────────────────────────────────
-  // Determine up-front whether ZAP can be attempted:
-  //   - Skipped if --no-zap flag is set
-  //   - Skipped if ZAP is not reachable AND ZAP_DOCKER is not 'true'
-  const zapConfigured = !flags.noZap && (process.env.ZAP_DOCKER === 'true' || process.env.ZAP_API_URL);
   const s2 = Date.now();
   if (flags.noZap) {
     stageLog(2, 'Start OWASP ZAP', 'SKIPPED');
     console.log(`  ${C.dim}↷ ZAP skipped  (--no-zap)${C.reset}`);
-  } else if (!zapConfigured) {
-    stageLog(2, 'Start OWASP ZAP', 'SKIPPED');
-    console.log(`  ${C.dim}↷ ZAP skipped — ZAP_DOCKER is not true and ZAP_API_URL is not set${C.reset}`);
-    console.log(`  ${C.dim}  To enable: set ZAP_DOCKER=true (Docker) or ZAP_API_URL=http://host:8080 (running instance)${C.reset}`);
+  } else if (process.env.ZAP_DOCKER !== 'true') {
+    // Pre-ping: check if ZAP is already running before showing RUNNING
+    const isReachable = await zapReachable();
+    if (!isReachable) {
+      // Attempt auto-launch via ZAP_PATH
+      stageLog(2, 'Start OWASP ZAP', 'RUNNING');
+      console.log(`  ${C.dim}→ ZAP not running — attempting auto-launch...${C.reset}`);
+      const launched = await launchZapDaemon();
+      if (!launched) {
+        stageLog(2, 'Start OWASP ZAP', 'SKIPPED');
+        console.log(`  ${C.yellow}⚠ ZAP could not be started automatically${C.reset}`);
+        console.log(`  ${C.dim}  Set ZAP_PATH in .env or start ZAP manually:${C.reset}`);
+        console.log(`  ${C.dim}  zap.bat -daemon -port 8080 -config api.key=${process.env.ZAP_API_KEY || 'changeme'}${C.reset}`);
+      } else {
+        logger.info('[ZAP] Auto-launched and ready');
+        zapStarted = true;
+        console.log(`  ${C.green}✓ ZAP auto-launched and ready${C.reset}`);
+        stageLog(2, 'Start OWASP ZAP', `DONE (${elapsed(s2)}s)`);
+      }
+    } else {
+      stageLog(2, 'Start OWASP ZAP', 'RUNNING');
+      try {
+        const zapState = await secService.startZap({});
+        zapStarted = zapState.started;
+        console.log(`  ${C.green}✓ ZAP ready (version: ${zapState.version})${C.reset}`);
+        stageLog(2, 'Start OWASP ZAP', `DONE (${elapsed(s2)}s)`);
+      } catch (err) {
+        logger.warn(`[run-security] Stage 2 — ZAP start failed: ${err.message}`);
+        console.log(`  ${C.yellow}⚠ ZAP start failed — continuing with custom checks only${C.reset}`);
+        stageLog(2, 'Start OWASP ZAP', `WARN (${elapsed(s2)}s)`);
+      }
+    }
   } else {
+    // ZAP_DOCKER=true — launch container
     stageLog(2, 'Start OWASP ZAP', 'RUNNING');
     try {
       const zapState = await secService.startZap({});
       zapStarted = zapState.started;
       if (!zapStarted) {
-        console.log(`  ${C.yellow}⚠ ZAP not available — continuing with custom checks only${C.reset}`);
+        console.log(`  ${C.yellow}⚠ ZAP Docker container did not start — continuing with custom checks only${C.reset}`);
         stageLog(2, 'Start OWASP ZAP', `WARN (${elapsed(s2)}s)`);
       } else {
         console.log(`  ${C.green}✓ ZAP ready (version: ${zapState.version})${C.reset}`);
         stageLog(2, 'Start OWASP ZAP', `DONE (${elapsed(s2)}s)`);
       }
     } catch (err) {
-      logger.warn(`[run-security] Stage 2 — ZAP start failed: ${err.message}`);
+      logger.warn(`[run-security] Stage 2 — ZAP Docker start failed: ${err.message}`);
       console.log(`  ${C.yellow}⚠ ZAP start failed — continuing with custom checks only${C.reset}`);
       stageLog(2, 'Start OWASP ZAP', `WARN (${elapsed(s2)}s)`);
     }
@@ -104,35 +185,45 @@ async function main() {
   stageLog(3, 'Run ZAP + custom security scans', 'RUNNING');
   const s3 = Date.now();
 
-  // All supported custom check names (must be defined before first use)
+  // All 18 custom check names — always run the full set regardless of config
   const ALL_CHECKS = [
     'missing-security-headers', 'insecure-cookie-flags', 'session-fixation',
     'open-redirect', 'sensitive-data-in-response', 'csrf-token-absence',
     'idor-employee-id', 'sql-injection-signal', 'xss-reflection-signal',
-    'broken-auth-brute-force',
+    'broken-auth-brute-force', 'http-methods-allowed', 'server-version-disclosure',
+    'cors-misconfiguration', 'clickjacking-protection', 'directory-traversal-signal',
+    'user-enumeration', 'password-policy-enforcement', 'information-disclosure-errors',
   ];
 
   // Load scan config
   const configPath = path.join(ROOT, 'tests', 'security', `${storyKey}-scan-config.json`);
-  let zapConfig    = null;
-  let checkNames   = ALL_CHECKS;
+  let zapConfig = null;
 
   if (fs.existsSync(configPath)) {
     try {
-      const cfg  = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      const cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'));
       zapConfig  = cfg.zapConfig;
-      checkNames = cfg.customChecks || ALL_CHECKS;
-    } catch { checkNames = ALL_CHECKS; }
-  } else {
-    checkNames = ALL_CHECKS;
-    zapConfig  = {
+    } catch { /* use defaults */ }
+  }
+
+  if (!zapConfig) {
+    zapConfig = {
       targetUrl:    targetUrl,
-      scanType:     process.env.ZAP_SCAN_TYPE || 'baseline',
+      scanType:     process.env.ZAP_SCAN_TYPE || 'full',
       contextName:  `${storyKey}-context`,
-      authScript:   false,
-      ajaxSpider:   false,
+      authScript:   true,
+      ajaxSpider:   true,
       reportFormat: 'json',
     };
+  }
+
+  // Establish authenticated session for checks that need it
+  console.log(`  ${C.dim}→ Establishing authenticated session...${C.reset}`);
+  const sessionCookies = await secService.getAuthSession(targetUrl);
+  if (sessionCookies) {
+    console.log(`  ${C.green}✓ Authenticated session ready${C.reset}`);
+  } else {
+    console.log(`  ${C.yellow}⚠ No auth session — running unauthenticated checks only${C.reset}`);
   }
 
   // ZAP scan
@@ -147,10 +238,12 @@ async function main() {
     }
   }
 
-  // Custom checks (sequential)
-  console.log(`  Running ${checkNames.length} custom security checks...`);
-  const customResults = await secService.runCustomChecks(checkNames, targetUrl, '');
-  console.log(`  ${C.green}✓ Custom checks complete (${customResults.length} checks run)${C.reset}`);
+  // Custom checks (sequential) — always run all 18
+  console.log(`  Running ${ALL_CHECKS.length} custom security checks...`);
+  const customResults = await secService.runCustomChecks(ALL_CHECKS, targetUrl, sessionCookies);
+  const passedCount = customResults.filter(r => r.passed).length;
+  const failedCount = customResults.filter(r => !r.passed).length;
+  console.log(`  ${C.green}✓ Custom checks complete: ${passedCount} passed, ${failedCount} flagged${C.reset}`);
 
   stageLog(3, 'Run ZAP + custom security scans', `DONE (${elapsed(s3)}s)`);
 

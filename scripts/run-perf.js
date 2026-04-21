@@ -153,7 +153,15 @@ async function main() {
     } catch (err) {
       logger.error(`[run-perf] Script failed: ${basename}: ${err.message}`);
       console.error(`  ${C.red}✗ ${basename}: ${err.message}${C.reset}`);
-      allResults.push({ scriptPath, basename, verdict: 'fail', breaches: [], metrics: {} });
+      // Even on a "failed" run, the k6 output file may be valid (threshold breach = run completed).
+      // Try to parse the metrics so Stage 3 shows real numbers instead of zeros.
+      let metrics = {};
+      try {
+        if (fs.existsSync(outJsonPath)) {
+          metrics = parsePerfResults(outJsonPath);
+        }
+      } catch { /* file unavailable or corrupt — leave metrics empty */ }
+      allResults.push({ scriptPath, basename, verdict: 'fail', breaches: [], metrics });
       totalRun++;
     }
   }

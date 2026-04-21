@@ -4,25 +4,40 @@
   "targetUrl": "https://opensource-demo.orangehrmlive.com",
   "zapConfig": {
     "targetUrl": "https://opensource-demo.orangehrmlive.com",
-    "scanType": "baseline",
+    "scanType": "full",
     "contextName": "SCRUM-5-context",
-    "authScript": false,
-    "ajaxSpider": false,
+    "authScript": true,
+    "ajaxSpider": true,
     "reportFormat": "json"
   },
   "owaspChecklist": [
-    {
-      "id": "A07:2021",
-      "name": "Auth Failures",
-      "applicable": true,
-      "scanType": "both",
-      "customChecks": [
-        "session-fixation"
-      ]
-    }
+    { "id": "A01:2021", "name": "Broken Access Control",    "applicable": true, "scanType": "both" },
+    { "id": "A02:2021", "name": "Cryptographic Failures",   "applicable": true, "scanType": "both" },
+    { "id": "A03:2021", "name": "Injection",                "applicable": true, "scanType": "active" },
+    { "id": "A05:2021", "name": "Security Misconfiguration","applicable": true, "scanType": "both" },
+    { "id": "A07:2021", "name": "Auth Failures",            "applicable": true, "scanType": "both" },
+    { "id": "A09:2021", "name": "Logging & Monitoring",     "applicable": true, "scanType": "passive" },
+    { "id": "A10:2021", "name": "SSRF",                     "applicable": true, "scanType": "active" }
   ],
   "customChecks": [
-    "missing-security-headers"
+    "missing-security-headers",
+    "insecure-cookie-flags",
+    "session-fixation",
+    "open-redirect",
+    "sensitive-data-in-response",
+    "csrf-token-absence",
+    "idor-employee-id",
+    "sql-injection-signal",
+    "xss-reflection-signal",
+    "broken-auth-brute-force",
+    "http-methods-allowed",
+    "server-version-disclosure",
+    "cors-misconfiguration",
+    "clickjacking-protection",
+    "directory-traversal-signal",
+    "user-enumeration",
+    "password-policy-enforcement",
+    "information-disclosure-errors"
   ],
   "zapApiUrl": "http://localhost:8080",
   "zapApiKey": "changeme"
