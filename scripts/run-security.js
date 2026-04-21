@@ -24,19 +24,18 @@ function zapReachable() {
 }
 
 /**
- * Attempts to auto-launch ZAP in daemon mode using ZAP_PATH.
- * Polls until ZAP is reachable or timeout (90s).
- * @returns {Promise<boolean>} true if ZAP becomes reachable
+ * Spawns the ZAP process in the background without waiting.
+ * Returns false (with a log) if ZAP_PATH is missing.
  */
-async function launchZapDaemon() {
+function spawnZapProcess() {
   const zapPath = process.env.ZAP_PATH;
   if (!zapPath || !fs.existsSync(zapPath)) {
-    logger.info('[ZAP] ZAP_PATH not set or file not found — cannot auto-launch');
+    logger.info('[ZAP] ZAP_PATH not set or binary not found — cannot auto-launch');
     return false;
   }
   const port   = (process.env.ZAP_API_URL || 'http://localhost:8080').replace(/.*:/, '');
   const apiKey = process.env.ZAP_API_KEY || 'changeme';
-  logger.info(`[ZAP] Auto-launching ZAP daemon on port ${port}...`);
+  logger.info(`[ZAP] Spawning ZAP daemon on port ${port} (background)...`);
   const child = spawn(zapPath, [
     '-daemon',
     '-host', '127.0.0.1',
@@ -45,22 +44,39 @@ async function launchZapDaemon() {
     '-config', 'api.addrs.addr.name=.*',
     '-config', 'api.addrs.addr.regex=true',
   ], {
-    cwd:         path.dirname(zapPath), // zap.bat uses relative jar path — must run from its own dir
+    cwd:         path.dirname(zapPath),
     detached:    true,
     stdio:       'ignore',
     windowsHide: true,
-    shell:       true,  // required on Windows for .bat files
+    shell:       true,
   });
-  child.unref(); // do not block Node process
+  child.unref();
+  return true;
+}
 
-  // Poll for up to 90 seconds
-  const deadline = Date.now() + 90000;
+/**
+ * Polls until ZAP responds or timeout expires.
+ * @param {number} timeoutMs  default 90 s
+ * @returns {Promise<boolean>}
+ */
+async function waitForZap(timeoutMs = 90000) {
+  const pollMs   = parseInt(process.env.ZAP_POLL_INTERVAL_MS || '2000', 10);
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, 4000));
     if (await zapReachable()) return true;
-    logger.info('[ZAP] Waiting for ZAP to start...');
+    logger.info('[ZAP] Waiting for ZAP to be ready...');
+    await new Promise(r => setTimeout(r, pollMs));
   }
   return false;
+}
+
+/**
+ * Convenience: spawn + wait (used when ZAP was not pre-launched).
+ * @returns {Promise<boolean>}
+ */
+async function launchZapDaemon() {
+  if (!spawnZapProcess()) return false;
+  return waitForZap();
 }
 
 const ROOT = path.resolve(__dirname, '..');
@@ -112,6 +128,26 @@ async function main() {
   let zapReportPath = null;
   let zapStarted    = false;
 
+  // ── Pre-flight: start ZAP in background NOW so it warms up during Stage 1 ──
+  let zapBootPromise = null;
+  const wantZap = !flags.noZap && process.env.ZAP_DOCKER !== 'true'
+    && process.env.ZAP_AUTO_LAUNCH === 'true';
+  if (wantZap) {
+    const alreadyUp = await zapReachable();
+    if (alreadyUp) {
+      zapBootPromise = Promise.resolve(true);   // already running — nothing to do
+      console.log(`${C.dim}  ↗ ZAP already running — ready to scan${C.reset}`);
+    } else {
+      const spawned = spawnZapProcess();
+      if (spawned) {
+        zapBootPromise = waitForZap();            // polling runs concurrently with Stage 1
+        console.log(`${C.dim}  ↗ ZAP daemon starting in background (will be ready by Stage 2)...${C.reset}`);
+      } else {
+        zapBootPromise = Promise.resolve(false);  // no ZAP_PATH — will skip
+      }
+    }
+  }
+
   // ── Stage 1 — Generate scan config ──────────────────────────────────────
   stageLog(1, 'Generate security scan config', flags.skipGenerate ? 'SKIPPED' : 'RUNNING');
   const s1 = Date.now();
@@ -128,41 +164,9 @@ async function main() {
   const s2 = Date.now();
   if (flags.noZap) {
     stageLog(2, 'Start OWASP ZAP', 'SKIPPED');
-    console.log(`  ${C.dim}↷ ZAP skipped  (--no-zap)${C.reset}`);
-  } else if (process.env.ZAP_DOCKER !== 'true') {
-    // Pre-ping: check if ZAP is already running before showing RUNNING
-    const isReachable = await zapReachable();
-    if (!isReachable) {
-      // Attempt auto-launch via ZAP_PATH
-      stageLog(2, 'Start OWASP ZAP', 'RUNNING');
-      console.log(`  ${C.dim}→ ZAP not running — attempting auto-launch...${C.reset}`);
-      const launched = await launchZapDaemon();
-      if (!launched) {
-        stageLog(2, 'Start OWASP ZAP', 'SKIPPED');
-        console.log(`  ${C.yellow}⚠ ZAP could not be started automatically${C.reset}`);
-        console.log(`  ${C.dim}  Set ZAP_PATH in .env or start ZAP manually:${C.reset}`);
-        console.log(`  ${C.dim}  zap.bat -daemon -port 8080 -config api.key=${process.env.ZAP_API_KEY || 'changeme'}${C.reset}`);
-      } else {
-        logger.info('[ZAP] Auto-launched and ready');
-        zapStarted = true;
-        console.log(`  ${C.green}✓ ZAP auto-launched and ready${C.reset}`);
-        stageLog(2, 'Start OWASP ZAP', `DONE (${elapsed(s2)}s)`);
-      }
-    } else {
-      stageLog(2, 'Start OWASP ZAP', 'RUNNING');
-      try {
-        const zapState = await secService.startZap({});
-        zapStarted = zapState.started;
-        console.log(`  ${C.green}✓ ZAP ready (version: ${zapState.version})${C.reset}`);
-        stageLog(2, 'Start OWASP ZAP', `DONE (${elapsed(s2)}s)`);
-      } catch (err) {
-        logger.warn(`[run-security] Stage 2 — ZAP start failed: ${err.message}`);
-        console.log(`  ${C.yellow}⚠ ZAP start failed — continuing with custom checks only${C.reset}`);
-        stageLog(2, 'Start OWASP ZAP', `WARN (${elapsed(s2)}s)`);
-      }
-    }
-  } else {
-    // ZAP_DOCKER=true — launch container
+    console.log(`  ${C.dim}↷ ZAP skipped (--no-zap)${C.reset}`);
+  } else if (process.env.ZAP_DOCKER === 'true') {
+    // Docker path — unchanged
     stageLog(2, 'Start OWASP ZAP', 'RUNNING');
     try {
       const zapState = await secService.startZap({});
@@ -179,6 +183,24 @@ async function main() {
       console.log(`  ${C.yellow}⚠ ZAP start failed — continuing with custom checks only${C.reset}`);
       stageLog(2, 'Start OWASP ZAP', `WARN (${elapsed(s2)}s)`);
     }
+  } else if (zapBootPromise) {
+    // Auto-launch path — ZAP was pre-spawned before Stage 1; just await the result
+    stageLog(2, 'Start OWASP ZAP', 'RUNNING');
+    console.log(`  ${C.dim}→ Waiting for ZAP daemon to finish starting...${C.reset}`);
+    const ready = await zapBootPromise;
+    if (ready) {
+      zapStarted = true;
+      console.log(`  ${C.green}✓ ZAP ready${C.reset}`);
+      stageLog(2, 'Start OWASP ZAP', `DONE (${elapsed(s2)}s)`);
+    } else {
+      console.log(`  ${C.yellow}⚠ ZAP did not start in time — continuing with custom checks only${C.reset}`);
+      console.log(`  ${C.dim}  Check ZAP_PATH in .env or start ZAP manually: zap.bat -daemon -port 8080 -config api.key=${process.env.ZAP_API_KEY || 'changeme'}${C.reset}`);
+      stageLog(2, 'Start OWASP ZAP', `WARN (${elapsed(s2)}s)`);
+    }
+  } else {
+    // ZAP_AUTO_LAUNCH=false — skip silently
+    stageLog(2, 'Start OWASP ZAP', 'SKIPPED');
+    console.log(`  ${C.dim}↷ ZAP auto-launch disabled — set ZAP_AUTO_LAUNCH=true in .env to enable${C.reset}`);
   }
 
   // ── Stage 3 — Run scans ──────────────────────────────────────────────────
