@@ -83,12 +83,90 @@ function collectFailingTests(suites, parentFile = '') {
 // ─── Determine healing strategy from error message ────────────────────────────
 function detectStrategy(error) {
   const e = (error || '').toLowerCase();
+  // Strict-mode violation where the offending selector originates from a YAML
+  // page-object locator (substring :text() matching multiple elements).
+  // Handled proactively by patching the YAML rather than the spec.
+  if (/strict mode.*resolved to \d+ elements/.test(e) && /:text\(/.test(error || '')) return 'locator_yaml_strict';
   if (/timeout|timed.?out/.test(e))                              return 'timeout';
   if (/strict mode|multiple elements|more than one/.test(e))    return 'strict_mode';
   if (/not visible|is not visible|element.*hidden/.test(e))     return 'not_visible';
   if (/net::|err_|failed to load|navigation/.test(e))           return 'navigation';
   if (/no locator|locator.*not found|selector.*not found/.test(e)) return 'selector';
   return 'general';
+}
+
+// ─── Proactive YAML locator healing ──────────────────────────────────────────
+// Scans tests/pages/*.yml for the offending selector extracted from a Playwright
+// strict-mode violation and tightens `:text("…")` / `:text('…')` to
+// `:text-is("…")`. Where possible, the tightened text is expanded to the
+// fuller label inferred from the YAML key name (e.g. `employeeIdInput` →
+// "Employee Id") so the tightened selector matches exactly one element.
+// Matches tolerantly: we extract each `:text("X")` atom from the offending
+// selector and patch any YAML line containing that same atom.
+const PAGES_DIR = path.join(ROOT, 'tests', 'pages');
+
+// Convert a camelCase YAML key into a human-readable label, dropping trailing
+// UI-type suffixes. e.g. `employeeIdInput` → "Employee Id".
+const KEY_SUFFIXES = /(Input|Button|Field|Box|Label|Text|Group|Dropdown|Select|Row|Cell|Link|Icon|Image|Header|Title|Msg|Message|Error|Alert)$/;
+function deriveLabelFromKey(key) {
+  const stripped = key.replace(KEY_SUFFIXES, '');
+  // Split camelCase / snake_case into words
+  const words = stripped
+    .replace(/[_-]+/g, ' ')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!words.length) return null;
+  return words.map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
+}
+
+function healYamlLocator(errorMsg) {
+  if (!fs.existsSync(PAGES_DIR)) return null;
+  const m = /locator\('([^']+)'\)/.exec(errorMsg) || /locator\("([^"]+)"\)/.exec(errorMsg);
+  if (!m) return null;
+  const offending = m[1];
+  const atoms = [...offending.matchAll(/:text\((['"])([^'"]+)\1\)/g)]
+    .map(a => ({ full: a[0], quote: a[1], value: a[2] }));
+  if (atoms.length === 0) return null;
+
+  const yamlFiles = fs.readdirSync(PAGES_DIR).filter(f => f.endsWith('.yml') || f.endsWith('.yaml'));
+  const changes = [];
+  for (const yf of yamlFiles) {
+    const fp = path.join(PAGES_DIR, yf);
+    const originalContent = fs.readFileSync(fp, 'utf8');
+    const lines = originalContent.split(/\r?\n/);
+    let modified = false;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      // Match lines of the form `someKey: 'selector...'` or `someKey: "selector..."`
+      const km = /^(\s*)([A-Za-z_][\w]*)\s*:\s*(['"])(.+)\3\s*$/.exec(line);
+      if (!km) continue;
+      const [, indent, key, quote, selector] = km;
+      let patched = selector;
+      let didPatch = false;
+      for (const a of atoms) {
+        if (!patched.includes(a.full)) continue;
+        // Prefer key-derived label if it starts with the atom value (substring),
+        // otherwise keep the atom value as-is.
+        const derived = deriveLabelFromKey(key);
+        const betterText = (derived && derived.toLowerCase().startsWith(a.value.toLowerCase()))
+          ? derived : a.value;
+        const replacement = `:text-is(${a.quote}${betterText}${a.quote})`;
+        patched = patched.split(a.full).join(replacement);
+        didPatch = true;
+      }
+      if (didPatch && patched !== selector) {
+        lines[i] = `${indent}${key}: ${quote}${patched}${quote}`;
+        modified = true;
+      }
+    }
+    if (modified) {
+      fs.writeFileSync(fp, lines.join('\n'), 'utf8');
+      changes.push({ file: yf, from: atoms.map(a => a.full).join(', ') });
+    }
+  }
+  return changes.length ? { patchedFiles: changes.map(c => c.file), changes } : null;
 }
 
 // ─── Apply healing patches to spec content ────────────────────────────────────
@@ -259,6 +337,49 @@ async function main() {
 
     const firstError = tests[0].error || '';
     const strategy   = detectStrategy(firstError);
+
+    // ── Proactive path: heal the YAML locator (single fix for many specs) ──
+    if (strategy === 'locator_yaml_strict') {
+      const yamlPatch = healYamlLocator(firstError);
+      if (yamlPatch) {
+        console.log(`  ${C.cyan}🔧 Proactively healed locator for: ${C.bold}${filename}${C.reset}`);
+        console.log(`     Strategy : locator_yaml_strict (YAML page-object)`);
+        for (const ch of yamlPatch.changes) {
+          console.log(`     Patched  : tests/pages/${ch.file}`);
+          console.log(`                  ${C.dim}- ${ch.from.slice(0, 90)}${ch.from.length > 90 ? '…' : ''}${C.reset}`);
+          const toLabel = ch.from.replace(/:text\(/g, ':text-is(');
+          console.log(`                  ${C.dim}+ ${toLabel.slice(0, 90)}${toLabel.length > 90 ? '…' : ''} (key-inferred text where possible)${C.reset}`);
+        }
+        console.log(`     Error    : ${firstError.slice(0, 100)}\n`);
+        healReport.push({
+          filename, strategy,
+          applied: ['yaml-locator-tightened', ...yamlPatch.patchedFiles.map(f => `page:${f}`)],
+          originalError: firstError.slice(0, 150),
+          yamlOnly: true,
+        });
+        fs.copyFileSync(origPath, path.join(HEALED_DIR, filename));
+        continue;
+      }
+      // yamlPatch is null → check whether a sibling spec already tightened the
+      // same YAML atom in this run. If so, treat this spec as healed-by-sibling
+      // and let Stage 3 re-run it against the patched YAML.
+      const em = /locator\('([^']+)'\)/.exec(firstError) || /locator\("([^"]+)"\)/.exec(firstError);
+      const hadAtoms = em && /:text\(/.test(em[1]);
+      if (hadAtoms) {
+        console.log(`  ${C.cyan}🔧 Already healed by sibling: ${C.bold}${filename}${C.reset}`);
+        console.log(`     Strategy : locator_yaml_strict (shared YAML, no new change)\n`);
+        healReport.push({
+          filename, strategy,
+          applied: ['yaml-locator-tightened-by-sibling'],
+          originalError: firstError.slice(0, 150),
+          yamlOnly: true,
+        });
+        fs.copyFileSync(origPath, path.join(HEALED_DIR, filename));
+        continue;
+      }
+      // Fall through to regular healing if YAML patching didn't apply.
+    }
+
     const origContent = fs.readFileSync(origPath, 'utf8');
     const { healed, applied } = healSpec(origContent, strategy);
 
