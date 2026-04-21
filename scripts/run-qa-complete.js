@@ -211,15 +211,22 @@ async function main() {
   if (!flags.skipSecurity) {
     secService = require('../src/services/sec.execution.service');
 
-    // Start ZAP
-    if (!flags.noZap) {
+    // Start ZAP — only attempt if ZAP_DOCKER=true or ZAP_API_URL is set
+    const zapConfigured = !flags.noZap && (process.env.ZAP_DOCKER === 'true' || process.env.ZAP_API_URL);
+    if (zapConfigured) {
       try {
         const zapState = await secService.startZap({});
         zapStarted = zapState.started;
-        logger.info(`[complete] ZAP started: ${zapStarted}`);
+        if (zapStarted) {
+          logger.info(`[complete] ZAP started: version ${zapState.version}`);
+        } else {
+          logger.warn('[complete] ZAP not available — continuing with custom checks only');
+        }
       } catch (err) {
         logger.warn(`Stage 4c ZAP start non-fatal: ${err.message}`);
       }
+    } else if (!flags.noZap) {
+      logger.info('[complete] ZAP skipped — ZAP_DOCKER is not true and ZAP_API_URL is not set');
     }
 
     // Load config

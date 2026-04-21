@@ -69,22 +69,35 @@ async function main() {
   }
 
   // ── Stage 2 — Start ZAP ──────────────────────────────────────────────────
-  stageLog(2, 'Start OWASP ZAP', flags.noZap ? 'SKIPPED' : 'RUNNING');
+  // Determine up-front whether ZAP can be attempted:
+  //   - Skipped if --no-zap flag is set
+  //   - Skipped if ZAP is not reachable AND ZAP_DOCKER is not 'true'
+  const zapConfigured = !flags.noZap && (process.env.ZAP_DOCKER === 'true' || process.env.ZAP_API_URL);
   const s2 = Date.now();
-  if (!flags.noZap) {
+  if (flags.noZap) {
+    stageLog(2, 'Start OWASP ZAP', 'SKIPPED');
+    console.log(`  ${C.dim}↷ ZAP skipped  (--no-zap)${C.reset}`);
+  } else if (!zapConfigured) {
+    stageLog(2, 'Start OWASP ZAP', 'SKIPPED');
+    console.log(`  ${C.dim}↷ ZAP skipped — ZAP_DOCKER is not true and ZAP_API_URL is not set${C.reset}`);
+    console.log(`  ${C.dim}  To enable: set ZAP_DOCKER=true (Docker) or ZAP_API_URL=http://host:8080 (running instance)${C.reset}`);
+  } else {
+    stageLog(2, 'Start OWASP ZAP', 'RUNNING');
     try {
       const zapState = await secService.startZap({});
       zapStarted = zapState.started;
       if (!zapStarted) {
         console.log(`  ${C.yellow}⚠ ZAP not available — continuing with custom checks only${C.reset}`);
+        stageLog(2, 'Start OWASP ZAP', `WARN (${elapsed(s2)}s)`);
       } else {
         console.log(`  ${C.green}✓ ZAP ready (version: ${zapState.version})${C.reset}`);
+        stageLog(2, 'Start OWASP ZAP', `DONE (${elapsed(s2)}s)`);
       }
     } catch (err) {
       logger.warn(`[run-security] Stage 2 — ZAP start failed: ${err.message}`);
       console.log(`  ${C.yellow}⚠ ZAP start failed — continuing with custom checks only${C.reset}`);
+      stageLog(2, 'Start OWASP ZAP', `WARN (${elapsed(s2)}s)`);
     }
-    stageLog(2, 'Start OWASP ZAP', `DONE (${elapsed(s2)}s)`);
   }
 
   // ── Stage 3 — Run scans ──────────────────────────────────────────────────
