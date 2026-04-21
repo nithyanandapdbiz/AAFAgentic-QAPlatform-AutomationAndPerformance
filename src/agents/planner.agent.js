@@ -26,7 +26,26 @@ const TYPE_SIGNALS = {
   "UI Validation":  ["field", "form", "input", "label", "button", "display", "screen", "page", "ui", "view"],
   "Security":       ["password", "auth", "permission", "access", "role", "admin", "token", "login", "secure"],
   "Boundary":       ["limit", "max", "min", "length", "count", "number", "size", "range", "character"],
-  "Integration":    ["api", "sync", "service", "connect", "external", "third", "webhook", "email", "notification"]
+  "Integration":    ["api", "sync", "service", "connect", "external", "third", "webhook", "email", "notification"],
+  "performance":    [
+    "load test", "stress test", "spike", "soak", "throughput",
+    "latency", "response time", "concurrent users", "sla",
+    "scalability", "performance", "benchmark"
+  ],
+  "security":       [
+    "authentication", "authorisation", "authorization", "session",
+    "token", "jwt", "password", "rbac", "permission", "injection", "xss",
+    "csrf", "sql", "cookie", "sensitive data", "encryption", "ssl", "tls",
+    "security header", "redirect", "owasp", "vulnerability"
+  ],
+  "security-scan":  [
+    "owasp", "zap", "vulnerability", "penetration", "pentest",
+    "injection", "xss", "csrf", "sql injection", "broken auth",
+    "access control", "cryptographic", "misconfiguration",
+    "insecure", "sensitive data", "idor", "ssrf", "brute force",
+    "session fixation", "open redirect", "security scan",
+    "security audit", "security testing"
+  ]
 };
 
 // Design technique selection based on story content

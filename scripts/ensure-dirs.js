@@ -37,6 +37,18 @@ const OUTPUT_DIRS = [
   'custom-report',
   'playwright-report',
   '.auth',
+  'tests/perf/load',
+  'tests/perf/stress',
+  'tests/perf/spike',
+  'tests/perf/soak',
+  'tests/perf/scalability',
+  'tests/perf/breakpoint',
+  'tests/perf/baselines',
+  'test-results/perf',
+  'custom-report/perf',
+  'tests/security',
+  'test-results/security',
+  'custom-report/security',
 ];
 
 /**

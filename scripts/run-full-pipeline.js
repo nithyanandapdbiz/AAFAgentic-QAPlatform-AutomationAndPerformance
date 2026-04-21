@@ -21,6 +21,8 @@
  *
  * ─── Usage ───────────────────────────────────────────────────────────────────
  *   node scripts/run-full-pipeline.js                    ← full journey
+ *   node scripts/run-full-pipeline.js --include-perf      ← also run k6 performance tests
+ *   node scripts/run-full-pipeline.js --include-security   ← also run ZAP + custom security scans
  *   node scripts/run-full-pipeline.js --headless         ← CI / headless mode
  *   node scripts/run-full-pipeline.js --force            ← recreate Zephyr TCs
  *   node scripts/run-full-pipeline.js --skip-heal        ← skip self-healer
@@ -41,8 +43,10 @@ const ROOT  = path.resolve(__dirname, '..');
 const args  = process.argv.slice(2);
 const flags = new Set(args.map(a => a.toLowerCase()));
 
-const useHeadless = flags.has('--headless') || process.env.PW_HEADLESS === 'true';
-const useForce    = flags.has('--force');
+const useHeadless    = flags.has('--headless') || process.env.PW_HEADLESS === 'true';
+const useForce       = flags.has('--force');
+const includePerf    = flags.has('--include-perf');
+const includeSecurity = flags.has('--include-security');
 
 // ─── ANSI ──────────────────────────────────────────────────────────────────
 const C = {
@@ -68,6 +72,8 @@ function banner() {
   console.log(row(`  Story  : ${process.env.ISSUE_KEY || '(set ISSUE_KEY in .env)'}`));
   console.log(row(`  Mode   : ${useHeadless ? 'Headless (CI)' : 'Headed — visible browser'}`));
   console.log(row(`  Force  : ${useForce ? 'YES — will recreate Zephyr test cases' : 'No (dedup active)'}`));
+  console.log(row(`  Perf   : ${includePerf ? 'YES — k6 performance tests enabled' : 'No (use --include-perf)'}`));
+  console.log(row(`  Sec    : ${includeSecurity ? 'YES — ZAP + custom security scans enabled' : 'No (use --include-security)'}`));
   console.log(row(`  Time   : ${now()}`));
   console.log(`${C.bold}${C.purple}╚${B}╝${C.reset}\n`);
 }
@@ -123,6 +129,23 @@ const STAGES = [
     skip: () => false,
     softFail: true,
     extraEnv: () => ({ PW_HEADLESS: useHeadless ? 'true' : 'false' })
+  },
+  {
+    num: '3p', label: 'Performance tests — k6 pipeline',
+    desc: 'Generates k6 scripts, executes them, evaluates thresholds, syncs to Zephyr, produces perf report',
+    script: 'scripts/run-perf.js',
+    skip: () => !includePerf,
+    skipMsg: 'Perf tests skipped  (use --include-perf)',
+    softFail: true,
+    extraEnv: () => ({ PW_HEADLESS: useHeadless ? 'true' : 'false' })
+  },
+  {
+    num: '3s', label: 'Security tests — ZAP + custom checks',
+    desc: 'Runs OWASP ZAP baseline scan + 10 custom security checks, evaluates findings, produces security report',
+    script: 'scripts/run-security.js',
+    skip: () => !includeSecurity,
+    skipMsg: 'Security tests skipped  (use --include-security)',
+    softFail: true
   },
   {
     num: 4, label: 'Self-Healing Agent → repair & re-run failures',

@@ -1,0 +1,29 @@
+{
+  "storyKey": "SCRUM-5",
+  "generated": "2026-04-21T01:41:07.249Z",
+  "targetUrl": "https://opensource-demo.orangehrmlive.com",
+  "zapConfig": {
+    "targetUrl": "https://opensource-demo.orangehrmlive.com",
+    "scanType": "baseline",
+    "contextName": "SCRUM-5-context",
+    "authScript": false,
+    "ajaxSpider": false,
+    "reportFormat": "json"
+  },
+  "owaspChecklist": [
+    {
+      "id": "A07:2021",
+      "name": "Auth Failures",
+      "applicable": true,
+      "scanType": "both",
+      "customChecks": [
+        "session-fixation"
+      ]
+    }
+  ],
+  "customChecks": [
+    "missing-security-headers"
+  ],
+  "zapApiUrl": "http://localhost:8080",
+  "zapApiKey": "changeme"
+}

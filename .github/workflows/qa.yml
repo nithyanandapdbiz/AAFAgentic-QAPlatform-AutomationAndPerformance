@@ -36,12 +36,31 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
 
+      # ── 4b. Install k6 ───────────────────────────────────────────────────
+      - name: Install k6
+        run: |
+          sudo gpg --no-default-keyring \
+            --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
+            --keyserver hkp://keyserver.ubuntu.com:80 \
+            --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] \
+            https://dl.k6.io/deb stable main" \
+            | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update && sudo apt-get install k6
+      # ── 4c. Start OWASP ZAP ──────────────────────────────────────────────────────
+      - name: Start OWASP ZAP
+        run: |
+          docker pull zaproxy/zap-stable
+          docker run -d --name zap -p 8080:8080 zaproxy/zap-stable \
+            zap.sh -daemon -host 0.0.0.0 -port 8080 \
+            -config api.key=${{ secrets.ZAP_API_KEY }}
+          sleep 15
       # ── 5. Run full QA pipeline ───────────────────────────────────────────
       #       continue-on-error: true so test failures don't block artifact
       #       upload and git push steps below.
       - name: Run full QA pipeline
         continue-on-error: true
-        run: node scripts/run-full-pipeline.js --headless
+        run: node scripts/run-qa-complete.js --headless
         env:
           ISSUE_KEY:          ${{ secrets.ISSUE_KEY }}
           PROJECT_KEY:        ${{ secrets.PROJECT_KEY }}
@@ -55,6 +74,13 @@ jobs:
           APPLITOOLS_CONCURRENCY: '5'
           APPLITOOLS_BATCH_ID:   ${{ github.run_id }}
           PW_HEADLESS:           'true'
+          PERF_SKIP_SOAK:        'true'
+          PERF_VUS_MAX:          '10'
+          ZAP_API_URL:           'http://localhost:8080'
+          ZAP_API_KEY:           ${{ secrets.ZAP_API_KEY }}
+          ZAP_DOCKER:            'false'
+          ZAP_SCAN_TYPE:         'baseline'
+          ZAP_FAIL_ON:           'high'
 
       # ── 6. Upload Playwright HTML report as artifact ──────────────────────
       - name: Upload Playwright report
@@ -73,8 +99,31 @@ jobs:
           name: custom-qa-report
           path: custom-report/
           retention-days: 30
+      # ── 7b. Upload security test results as artifact ──────────────────────────────────────────────────────
+      - name: Upload security test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-results
+          path: test-results/security/
+          retention-days: 30
+      # ── 7c. Upload performance HTML report as artifact ────────────────────────────────────────────
+      - name: Upload perf report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-report
+          path: custom-report/perf/
+          retention-days: 30
 
-      # ── 8. Upload Allure results as artifact ─────────────────────────────
+      # ── 7d. Upload security HTML report as artifact ──────────────────────────────────────────────
+      - name: Upload security report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: custom-report/security/
+          retention-days: 30      # ── 8. Upload Allure results as artifact ─────────────────────────────
       - name: Upload Allure results
         if: always()
         uses: actions/upload-artifact@v4
@@ -117,3 +166,8 @@ jobs:
             git commit -m "ci: update QA artifacts [skip ci]"
             git push origin main
           fi
+
+      # ── Stop ZAP teardown ──────────────────────────────────────────────────────────────────────────────────────
+      - name: Stop OWASP ZAP
+        if: always()
+        run: docker stop zap || true

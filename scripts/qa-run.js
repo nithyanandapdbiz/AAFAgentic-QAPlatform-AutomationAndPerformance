@@ -60,6 +60,15 @@ const flags  = new Set(args.map(a => a.toLowerCase()));
 // even when they already exist (useful after story changes).
 const useForce = flags.has('--force');
 
+// ─── Include-perf flag ────────────────────────────────────────────────────
+// Pass --include-perf to run k6 performance tests after Playwright execution.
+const useIncludePerf = flags.has('--include-perf');
+
+// ─── Include-security flag ────────────────────────────────────────────────
+// Pass --include-security to run OWASP ZAP + custom security checks after Playwright.
+const useIncludeSecurity = flags.has('--include-security');
+const useNoZap           = flags.has('--no-zap');
+
 // ─── Headed / headless mode ────────────────────────────────────────────────
 // Default: HEADED (PW_HEADLESS=false) for full UI/browser visibility.
 // Pass --headless flag or set PW_HEADLESS=true in .env to run without a UI.
@@ -267,6 +276,102 @@ async function main() {
     if (!ok && !isSoftFailure) {
       console.error(`\n${C.red}  Pipeline halted at Stage ${stage.num} (exit ${exitCode}).${C.reset}\n`);
       break;
+    }
+
+    // ── Stage 3b — generate k6 perf scripts (after Playwright spec generation) ──
+    if (stage.num === 2 && useIncludePerf) {
+      const storyKey = process.env.ISSUE_KEY || '';
+      const baseUrl  = process.env.BASE_URL  || 'https://opensource-demo.orangehrmlive.com';
+      console.log(`\n${C.cyan}  Stage 3b — generating k6 performance scripts${C.reset}`);
+      try {
+        await require('./generate-perf-scripts').run({ storyKey, baseUrl });
+      } catch (e) {
+        console.error(`  ${C.yellow}Stage 3b non-fatal error: ${e.message}${C.reset}`);
+      }
+    }
+
+    // ── Stage 4b + 5b — execute k6, evaluate, sync (after Playwright execution) ──
+    if (stage.num === 3 && useIncludePerf) {
+      console.log(`\n${C.cyan}  Stage 4b — executing k6 performance tests${C.reset}`);
+      try {
+        const perfResults = await require('../src/services/perf.execution.service')
+          .runAll({ storyKey: process.env.ISSUE_KEY, testResultsDir: 'test-results/perf' });
+        console.log(`\n${C.cyan}  Stage 5b — evaluating perf thresholds and syncing to Zephyr/Jira${C.reset}`);
+        await require('../src/services/perf.execution.service')
+          .syncResults(perfResults, { skipBugs: flags.has('--skip-bugs') });
+      } catch (e) {
+        console.error(`  ${C.yellow}Stage 4b/5b non-fatal error: ${e.message}${C.reset}`);
+      }
+    }
+
+    // ── Stage 3c — generate security scan config (after Playwright spec generation) ──
+    if (stage.num === 2 && useIncludeSecurity) {
+      const storyKey = process.env.ISSUE_KEY || '';
+      const baseUrl  = process.env.BASE_URL  || 'https://opensource-demo.orangehrmlive.com';
+      console.log(`\n${C.cyan}  Stage 3c — generating security scan config${C.reset}`);
+      try {
+        await require('./generate-sec-scripts').run({ storyKey, baseUrl });
+      } catch (e) {
+        console.error(`  ${C.yellow}Stage 3c non-fatal error: ${e.message}${C.reset}`);
+      }
+    }
+
+    // ── Stage 4c + 5c — execute ZAP + custom checks, sync (after Playwright execution) ──
+    if (stage.num === 3 && useIncludeSecurity) {
+      const storyKey  = process.env.ISSUE_KEY || '';
+      const targetUrl = process.env.BASE_URL  || 'https://opensource-demo.orangehrmlive.com';
+      console.log(`\n${C.cyan}  Stage 4c — running OWASP ZAP + custom security checks${C.reset}`);
+      try {
+        const secService   = require('../src/services/sec.execution.service');
+        let zapStarted     = false;
+        let zapReportPath  = null;
+        const ALL_CHECKS   = [
+          'missing-security-headers', 'insecure-cookie-flags', 'session-fixation',
+          'open-redirect', 'sensitive-data-in-response', 'csrf-token-absence',
+          'idor-employee-id', 'sql-injection-signal', 'xss-reflection-signal',
+          'broken-auth-brute-force',
+        ];
+
+        if (!useNoZap) {
+          try {
+            const z = await secService.startZap({});
+            zapStarted = z.started;
+          } catch (e2) {
+            console.error(`  ${C.yellow}ZAP start non-fatal: ${e2.message}${C.reset}`);
+          }
+        }
+
+        if (!useNoZap && zapStarted) {
+          try {
+            zapReportPath = await secService.runZapScan({
+              targetUrl, scanType: process.env.ZAP_SCAN_TYPE || 'baseline',
+              contextName: `${storyKey}-context`, reportFormat: 'json',
+            });
+          } catch (e2) {
+            console.error(`  ${C.yellow}ZAP scan non-fatal: ${e2.message}${C.reset}`);
+          }
+        }
+
+        const customResults = await secService.runCustomChecks(ALL_CHECKS, targetUrl, '');
+        const { findings }  = secService.parseFindings(zapReportPath, customResults);
+        const policy        = {
+          failOn: process.env.ZAP_FAIL_ON || 'high',
+          warnOn: process.env.ZAP_WARN_ON || 'medium',
+          maxIssues: parseInt(process.env.ZAP_MAX_ISSUES || '0', 10),
+        };
+        const { verdict } = secService.evaluateSeverity(findings, policy);
+
+        console.log(`\n${C.cyan}  Stage 5c — syncing security results to Zephyr/Jira${C.reset}`);
+        if (!flags.has('--skip-bugs')) {
+          await secService.syncToZephyrAndJira(findings, verdict, storyKey, {});
+        }
+
+        if (!useNoZap && zapStarted) {
+          try { await secService.stopZap(); } catch { /* ignore */ }
+        }
+      } catch (e) {
+        console.error(`  ${C.yellow}Stage 4c/5c non-fatal error: ${e.message}${C.reset}`);
+      }
     }
   }
 

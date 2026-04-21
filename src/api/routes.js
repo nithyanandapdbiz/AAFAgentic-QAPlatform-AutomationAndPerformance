@@ -3,6 +3,8 @@ const express = require("express");
 const { getDashboard } = require("./dashboard.controller");
 const { handleJiraWebhook, handleManualTrigger, getWebhookStatus } = require("./webhook.controller");
 const { listAll, getSummary, listByTest, serveScreenshot } = require("./screenshot.controller");
+const { getSecuritySummary } = require("./security.controller");
+const { getPerfSummary } = require("./perf.controller");
 
 const router = express.Router();
 
@@ -30,5 +32,11 @@ router.get("/screenshots/summary",     getSummary);           // Aggregated stat
 router.get("/screenshots",             listAll);              // All tests + screenshots
 router.get("/screenshots/:test",       listByTest);           // Screenshots for one test
 router.get("/screenshots/:test/:file", serveScreenshot);      // Serve image file
+
+// ── Security ──────────────────────────────────────────────────────
+router.get("/security/summary",        getSecuritySummary);  // Latest security scan summary
+
+// ── Performance ───────────────────────────────────────────────────
+router.get("/perf/summary",            getPerfSummary);      // Latest performance test summary
 
 module.exports = router;
