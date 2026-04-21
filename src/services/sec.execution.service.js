@@ -206,9 +206,21 @@ async function runZapScan(zapConfig) {
       await new Promise(r => setTimeout(r, 30000));
     }
 
-    // Fetch JSON report
+    // Fetch JSON report — validate before writing
     const reportRes = await httpGet(zapUrl(`/JSON/core/other/jsonreport/?apikey=${key}`));
-    fs.writeFileSync(reportPath, reportRes.body, 'utf8');
+    const reportBody = (reportRes.body || '').trim();
+    if (!reportBody) {
+      // ZAP returned an empty body — write a valid empty report so parseFindings won't crash
+      logger.warn('[ZAP] Report response was empty — writing empty report stub');
+      fs.writeFileSync(reportPath, JSON.stringify({ site: [] }), 'utf8');
+    } else {
+      // Verify it's valid JSON before persisting
+      try { JSON.parse(reportBody); } catch {
+        logger.warn('[ZAP] Report response is not valid JSON — writing empty report stub');
+        fs.writeFileSync(reportPath, JSON.stringify({ site: [] }), 'utf8');
+      }
+      fs.writeFileSync(reportPath, reportBody, 'utf8');
+    }
     logger.info(`[ZAP] Report written: ${reportPath}`);
     return reportPath;
   } catch (err) {
@@ -562,7 +574,11 @@ function parseFindings(zapJsonPath, customResults = []) {
     // Parse ZAP report
     if (zapJsonPath && fs.existsSync(zapJsonPath)) {
       try {
-        const raw  = fs.readFileSync(zapJsonPath, 'utf8');
+        const raw  = (fs.readFileSync(zapJsonPath, 'utf8') || '').trim();
+        if (!raw) {
+          logger.info('[SecExecution] ZAP report file is empty — no ZAP findings to parse');
+          return { findings: [], summary: { critical: 0, high: 0, medium: 0, low: 0, informational: 0 } };
+        }
         const data = JSON.parse(raw);
         const alerts = data.alerts || data.site?.[0]?.alerts || [];
         for (const alert of alerts) {
