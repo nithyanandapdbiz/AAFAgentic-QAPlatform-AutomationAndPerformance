@@ -583,6 +583,14 @@ thresholds: {
 
 [`generate-perf-report.js`](scripts/generate-perf-report.js) renders per-test-type dashboards with Chart.js, SLA breach markers, and baseline deltas. Aggregated via `GET /perf/summary`.
 
+**Visualisations (8 tabs).** Response Time (p95/p99 bars with SLA lines + error rate), **Latency Distribution** (p50/p90/p95/p99 grouped bars + avg-vs-throughput scatter), **Throughput Timeline** (RPS and p95 over time, bucketed per 5s from raw NDJSON), **Network Breakdown** (stacked bar of `blocked`/`connecting`/`tls`/`sending`/`waiting`/`receiving`), All Scripts Table, Script Details (near-threshold warnings, breach alerts, stat grid, network table, baseline comparison), Baseline Comparison (with trend sparklines), VU vs Latency Timeline.
+
+**Time-bucketed series.** `buildTimeSeries(ndjsonPath, bucketSec=5)` streams the k6 NDJSON (`Point` events for `http_req_duration`/`http_reqs`/`http_req_failed`/`vus`), buckets by timestamp, and computes per-bucket `p50`/`p95`/`p99`/`rps`/`errorRate`/`vus`. Embedded inline in the HTML — no external assets.
+
+**Automated Insights.** `buildInsights(rows, thresholds)` auto-generates observations: near-SLA warnings (p99 ≥ 90% of threshold), error-rate breaches, baseline regressions, high TTFB detection (`waiting` > 500ms). Rendered as a colour-coded bullet list above the tabs.
+
+**Per-test-type aggregate panel.** When the run spans multiple test types (load/stress/spike/soak/scalability/breakpoint), a summary card grid surfaces per-type pass counts, avg p95, worst p99, throughput, error rate, and peak VUs.
+
 **Input discipline (standalone CLI path).** The CLI entry point (`npm run perf:report`, Stage 12 of [`run-e2e.js`](scripts/run-e2e.js)) globs `test-results/perf/` and filters to raw k6 NDJSON files only:
 
 ```js
