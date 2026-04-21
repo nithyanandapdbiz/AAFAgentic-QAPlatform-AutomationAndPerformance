@@ -66,7 +66,8 @@ function httpPost(url, bodyStr, headers = {}) {
 
 /** Poll a ZAP status URL until it returns "100" or timeout (ms) */
 async function pollZapStatus(statusUrl, timeoutMs = 300000) {
-  const start = Date.now();
+  const pollMs = parseInt(process.env.ZAP_POLL_INTERVAL_MS || '2000', 10);
+  const start  = Date.now();
   while (Date.now() - start < timeoutMs) {
     try {
       const res = await httpGet(statusUrl);
@@ -75,7 +76,7 @@ async function pollZapStatus(statusUrl, timeoutMs = 300000) {
       if (String(status) === '100') return true;
       logger.info(`[ZAP] Scan progress: ${status}%`);
     } catch { /* ZAP not ready yet */ }
-    await new Promise(r => setTimeout(r, 5000));
+    await new Promise(r => setTimeout(r, pollMs));
   }
   throw new AppError(`ZAP scan timed out after ${timeoutMs / 1000}s`);
 }
@@ -169,6 +170,17 @@ async function runZapScan(zapConfig) {
       }
     }
 
+    // Configure spider speed limits before crawl
+    const spiderMaxDepth    = parseInt(process.env.ZAP_SPIDER_MAX_DEPTH         || '5',  10);
+    const spiderMaxDurMins  = parseInt(process.env.ZAP_SPIDER_MAX_DURATION_MINS || '3',  10);
+    const spiderMaxChildren = parseInt(process.env.ZAP_SPIDER_MAX_CHILDREN      || '10', 10);
+    try {
+      await httpPost(zapUrl('/JSON/spider/action/setOptionMaxDepth/'),    `apikey=${key}&Integer=${spiderMaxDepth}`);
+      await httpPost(zapUrl('/JSON/spider/action/setOptionMaxDuration/'), `apikey=${key}&Integer=${spiderMaxDurMins}`);
+      await httpPost(zapUrl('/JSON/spider/action/setOptionMaxChildren/'), `apikey=${key}&Integer=${spiderMaxChildren}`);
+      logger.info(`[ZAP] Spider limits — depth:${spiderMaxDepth} duration:${spiderMaxDurMins}min children:${spiderMaxChildren}`);
+    } catch (e) { logger.warn(`[ZAP] Spider config (non-fatal): ${e.message}`); }
+
     // Spider
     logger.info(`[ZAP] Starting spider on: ${zapConfig.targetUrl}`);
     const spiderRes = await httpPost(
@@ -178,9 +190,10 @@ async function runZapScan(zapConfig) {
     const spiderData = JSON.parse(spiderRes.body || '{}');
     const scanId = spiderData.scan || '0';
 
+    const spiderTimeoutMs = parseInt(process.env.ZAP_SPIDER_TIMEOUT_MS || '180000', 10);
     await pollZapStatus(
       zapUrl(`/JSON/spider/view/status/?apikey=${key}&scanId=${scanId}`),
-      180000
+      spiderTimeoutMs
     );
     logger.info('[ZAP] Spider complete');
 
@@ -190,8 +203,9 @@ async function runZapScan(zapConfig) {
       try {
         await httpPost(zapUrl('/JSON/ajaxSpider/action/scan/'), `apikey=${key}&url=${url}&inScope=false`);
         const ajaxStart = Date.now();
+        const ajaxPollMs = parseInt(process.env.ZAP_POLL_INTERVAL_MS || '2000', 10);
         while (Date.now() - ajaxStart < 120000) {
-          await new Promise(r => setTimeout(r, 4000));
+          await new Promise(r => setTimeout(r, ajaxPollMs));
           try {
             const st = await httpGet(zapUrl(`/JSON/ajaxSpider/view/status/?apikey=${key}`));
             if (JSON.parse(st.body || '{}').status === 'stopped') break;
@@ -205,6 +219,13 @@ async function runZapScan(zapConfig) {
 
     // Active scan or passive scan
     if (zapConfig.scanType === 'full' || zapConfig.scanType === 'api') {
+      // Increase active scan thread count for faster scanning
+      const ascanThreads = parseInt(process.env.ZAP_ASCAN_THREADS || '5', 10);
+      try {
+        await httpPost(zapUrl('/JSON/ascan/action/setOptionThreadPerHost/'), `apikey=${key}&Integer=${ascanThreads}`);
+        logger.info(`[ZAP] Active scan threads per host: ${ascanThreads}`);
+      } catch (e) { logger.warn(`[ZAP] Ascan thread config (non-fatal): ${e.message}`); }
+
       logger.info('[ZAP] Starting active scan...');
       const ascanRes = await httpPost(
         zapUrl('/JSON/ascan/action/scan/'),
@@ -213,16 +234,18 @@ async function runZapScan(zapConfig) {
       const ascanData = JSON.parse(ascanRes.body || '{}');
       const ascanId   = ascanData.scan || '0';
 
+      const activeScanTimeout = parseInt(process.env.ZAP_SCAN_TIMEOUT_MS || '1200000', 10);
       await pollZapStatus(
         zapUrl(`/JSON/ascan/view/status/?apikey=${key}&scanId=${ascanId}`),
-        600000
+        activeScanTimeout
       );
       logger.info('[ZAP] Active scan complete');
     } else {
       // Baseline — enable passive scanners and wait
       await httpPost(zapUrl('/JSON/pscan/action/enableAllScanners/'), `apikey=${key}`);
-      logger.info('[ZAP] Passive scan — waiting 30s...');
-      await new Promise(r => setTimeout(r, 30000));
+      const passiveWaitMs = parseInt(process.env.ZAP_PASSIVE_WAIT_MS || '15000', 10);
+      logger.info(`[ZAP] Passive scan — waiting ${passiveWaitMs / 1000}s...`);
+      await new Promise(r => setTimeout(r, passiveWaitMs));
     }
 
     // Fetch JSON report — validate before writing
