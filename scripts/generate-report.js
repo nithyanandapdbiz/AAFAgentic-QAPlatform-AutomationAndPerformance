@@ -10,8 +10,8 @@
  *  - Per-test collapsible accordion cards (Pass = green, Fail = red)
  *  - Step-by-step table with duration + pass/fail badge per step
  *  - Failure step highlighted in red with inline error message
- *  - Playwright-captured failure screenshot embedded as base64
- *  - Video recording embedded as <video> element (WebM)
+ *  - End-of-test screenshot embedded as base64 (captured for every test)
+ *  - Video recording embedded as <video> element (WebM, captured for every test)
  *  - Step screenshots from ScreenshotHelper also shown
  *  - Allure report link in header (when allure-report/ exists)
  *
@@ -252,23 +252,26 @@ function buildHtml(tests, runDate, totalDuration) {
       </div>`;
     }
 
-    // ── Failure screenshot (Playwright-generated) ───────────────────────────
+    // ── End-of-test screenshot (Playwright-generated, always captured) ────────
     let failureScreenshotHtml = '';
     if (t.failureScreenshot) {
       const b64 = toBase64Png(t.failureScreenshot);
       if (b64) {
+        const isPass = t.status === 'Pass';
+        const caption = isPass ? 'Final state at test end' : 'Captured at point of failure';
+        const figClass = isPass ? 'screenshot-figure end-shot' : 'screenshot-figure failure-shot';
         failureScreenshotHtml = `
       <div class="failure-media">
-        <h4>Failure Screenshot</h4>
-        <figure class="screenshot-figure failure-shot">
-          <img src="${b64}" alt="Failure screenshot" loading="lazy" onclick="openLightbox(this)">
-          <figcaption>Captured at point of failure</figcaption>
+        <h4>Screenshot</h4>
+        <figure class="${figClass}">
+          <img src="${b64}" alt="End-of-test screenshot" loading="lazy" onclick="openLightbox(this)">
+          <figcaption>${caption}</figcaption>
         </figure>
       </div>`;
       }
     }
 
-    // ── Video recording ─────────────────────────────────────────────────────
+    // ── Video recording (always captured) ────────────────────────────────
     let videoHtml = '';
     if (t.videoPath) {
       const b64 = toBase64Webm(t.videoPath);
@@ -393,7 +396,8 @@ function buildHtml(tests, runDate, totalDuration) {
   .failure-media { margin-bottom: 20px; }
   .failure-media h4 { font-size: .85rem; color: #546e7a; margin-bottom: 10px;
                        text-transform: uppercase; letter-spacing: .05em; }
-  .failure-shot img { max-height: 400px; width: auto; }
+  .failure-shot img { max-height: 400px; width: auto; border: 2px solid #f44336; border-radius: 4px; }
+  .end-shot img     { max-height: 400px; width: auto; border: 2px solid #4caf50; border-radius: 4px; }
   .test-video { width: 100%; max-width: 720px; border-radius: 6px;
                 border: 1px solid #e0e0e0; background: #000; display: block; }
 

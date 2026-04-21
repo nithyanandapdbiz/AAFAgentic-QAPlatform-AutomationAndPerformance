@@ -69,7 +69,9 @@ function collectFailingTests(suites, parentFile = '') {
               file,
               title:  spec.title,
               status: r.status,
-              error:  String(errorMsg).slice(0, 600)
+              // 1200 chars: enough to capture the Playwright "Call log: waiting
+              // for locator('...')" section that appears after the headline.
+              error:  String(errorMsg).slice(0, 1200)
             });
             break;
           }
@@ -83,10 +85,13 @@ function collectFailingTests(suites, parentFile = '') {
 // ─── Determine healing strategy from error message ────────────────────────────
 function detectStrategy(error) {
   const e = (error || '').toLowerCase();
-  // Strict-mode violation where the offending selector originates from a YAML
-  // page-object locator (substring :text() matching multiple elements).
-  // Handled proactively by patching the YAML rather than the spec.
+  // Strict-mode violation: :text() (substring) resolves to N>1 elements.
+  // Patch the YAML to use :text-is() exact matching.
   if (/strict mode.*resolved to \d+ elements/.test(e) && /:text\(/.test(error || '')) return 'locator_yaml_strict';
+  // Locator drift: :text-is() exact match resolves to 0 elements because the
+  // label text changed in the new application build (timeout error).
+  // Patch the YAML by replacing the stale text atom with the key-derived label.
+  if (/timeout|timed.?out/.test(e) && /:text-is\(/.test(error || '')) return 'locator_yaml_drift';
   if (/timeout|timed.?out/.test(e))                              return 'timeout';
   if (/strict mode|multiple elements|more than one/.test(e))    return 'strict_mode';
   if (/not visible|is not visible|element.*hidden/.test(e))     return 'not_visible';
@@ -121,15 +126,17 @@ function deriveLabelFromKey(key) {
   return words.map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
 }
 
-function healYamlLocator(errorMsg) {
+/**
+ * Shared worker: scan every *.yml under PAGES_DIR, find selector lines that
+ * contain any of the given `atoms`, and replace the text atom with the
+ * key-derived label.  Works for both :text() (strict-mode) and :text-is()
+ * (label-drift) atoms.
+ *
+ * @param {Array<{full:string, quote:string, value:string}>} atoms
+ * @returns {{patchedFiles:string[], changes:object[]}|null}
+ */
+function _applyAtomPatchesToYaml(atoms) {
   if (!fs.existsSync(PAGES_DIR)) return null;
-  const m = /locator\('([^']+)'\)/.exec(errorMsg) || /locator\("([^"]+)"\)/.exec(errorMsg);
-  if (!m) return null;
-  const offending = m[1];
-  const atoms = [...offending.matchAll(/:text\((['"])([^'"]+)\1\)/g)]
-    .map(a => ({ full: a[0], quote: a[1], value: a[2] }));
-  if (atoms.length === 0) return null;
-
   const yamlFiles = fs.readdirSync(PAGES_DIR).filter(f => f.endsWith('.yml') || f.endsWith('.yaml'));
   const changes = [];
   for (const yf of yamlFiles) {
@@ -138,21 +145,22 @@ function healYamlLocator(errorMsg) {
     const lines = originalContent.split(/\r?\n/);
     let modified = false;
     for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      // Match lines of the form `someKey: 'selector...'` or `someKey: "selector..."`
-      const km = /^(\s*)([A-Za-z_][\w]*)\s*:\s*(['"])(.+)\3\s*$/.exec(line);
+      const km = /^(\s*)([A-Za-z_][\w]*)\s*:\s*(['"])(.+)\3\s*$/.exec(lines[i]);
       if (!km) continue;
       const [, indent, key, quote, selector] = km;
       let patched = selector;
       let didPatch = false;
       for (const a of atoms) {
         if (!patched.includes(a.full)) continue;
-        // Prefer key-derived label if it starts with the atom value (substring),
-        // otherwise keep the atom value as-is.
         const derived = deriveLabelFromKey(key);
+        // Use the key-derived label when it starts with the atom value (i.e.
+        // the atom text is a substring of the correct full label).
+        // e.g. atom ":text-is('Employee')" + key "employeeIdGroup"
+        //   → derived "Employee Id" starts with "Employee" → use "Employee Id".
         const betterText = (derived && derived.toLowerCase().startsWith(a.value.toLowerCase()))
           ? derived : a.value;
         const replacement = `:text-is(${a.quote}${betterText}${a.quote})`;
+        if (a.full === replacement) continue; // already correct, skip
         patched = patched.split(a.full).join(replacement);
         didPatch = true;
       }
@@ -167,6 +175,41 @@ function healYamlLocator(errorMsg) {
     }
   }
   return changes.length ? { patchedFiles: changes.map(c => c.file), changes } : null;
+}
+
+/**
+ * Heal :text() substring atoms → :text-is() (strict-mode violation case).
+ * Triggered when Playwright reports "resolved to N elements".
+ */
+function healYamlLocator(errorMsg) {
+  if (!fs.existsSync(PAGES_DIR)) return null;
+  const m = /locator\('([^']+)'\)/.exec(errorMsg) || /locator\("([^"]+)"\)/.exec(errorMsg);
+  if (!m) return null;
+  const atoms = [...m[1].matchAll(/:text\((['"])([^'"]+)\1\)/g)]
+    .map(a => ({ full: a[0], quote: a[1], value: a[2] }));
+  if (atoms.length === 0) return null;
+  return _applyAtomPatchesToYaml(atoms);
+}
+
+/**
+ * Heal :text-is() atoms whose label has drifted in the new build (timeout
+ * with 0 matches).  Derives the correct label from the YAML key name and
+ * replaces the stale text atom in every matching YAML line.
+ *
+ * E.g. :text-is("Employee") on key employeeIdGroup
+ *        → :text-is("Employee Id")   because deriveLabelFromKey("employeeIdGroup") = "Employee Id"
+ */
+function healYamlLocatorDrift(errorMsg) {
+  if (!fs.existsSync(PAGES_DIR)) return null;
+  // Playwright timeout errors carry the locator in the Call log:
+  //   "waiting for locator('.oxd-input-group:has(label:text-is("Employee")) input')"
+  // The regex captures the full selector string.
+  const m = /locator\('([^']+)'\)/.exec(errorMsg) || /locator\("([^"]+)"\)/.exec(errorMsg);
+  if (!m) return null;
+  const atoms = [...m[1].matchAll(/:text-is\((['"])([^'"]+)\1\)/g)]
+    .map(a => ({ full: a[0], quote: a[1], value: a[2] }));
+  if (atoms.length === 0) return null;
+  return _applyAtomPatchesToYaml(atoms);
 }
 
 // ─── Apply healing patches to spec content ────────────────────────────────────
@@ -338,7 +381,48 @@ async function main() {
     const firstError = tests[0].error || '';
     const strategy   = detectStrategy(firstError);
 
-    // ── Proactive path: heal the YAML locator (single fix for many specs) ──
+    // ── Proactive path A: drifted :text-is() label → 0 matches (timeout) ────
+    // The application build changed a label text so an exact-match locator
+    // now resolves to 0 elements.  Derive the correct label from the YAML key
+    // and patch the YAML before the spec is re-run.
+    if (strategy === 'locator_yaml_drift') {
+      const yamlPatch = healYamlLocatorDrift(firstError);
+      if (yamlPatch) {
+        console.log(`  ${C.cyan}🔧 Locator label drift healed: ${C.bold}${filename}${C.reset}`);
+        console.log(`     Strategy : locator_yaml_drift (text-is label changed in new build)`);
+        for (const ch of yamlPatch.changes) {
+          console.log(`     Patched  : tests/pages/${ch.file}`);
+          console.log(`                  ${C.dim}- ${ch.from.slice(0, 90)}${ch.from.length > 90 ? '…' : ''}${C.reset}`);
+          console.log(`                  ${C.dim}+ :text-is(<key-derived label>)${C.reset}`);
+        }
+        console.log(`     Error    : ${firstError.slice(0, 100)}\n`);
+        healReport.push({
+          filename, strategy,
+          applied: ['yaml-label-drift-healed', ...yamlPatch.patchedFiles.map(f => `page:${f}`)],
+          originalError: firstError.slice(0, 150),
+          yamlOnly: true,
+        });
+        fs.copyFileSync(origPath, path.join(HEALED_DIR, filename));
+        continue;
+      }
+      // YAML already patched by a sibling spec in this same run.
+      const em = /locator\('([^']+)'\)/.exec(firstError) || /locator\("([^"]+)"\)/.exec(firstError);
+      if (em && /:text-is\(/.test(em[1])) {
+        console.log(`  ${C.cyan}🔧 Drift already healed by sibling: ${C.bold}${filename}${C.reset}`);
+        console.log(`     Strategy : locator_yaml_drift (shared YAML, no new change)\n`);
+        healReport.push({
+          filename, strategy,
+          applied: ['yaml-label-drift-healed-by-sibling'],
+          originalError: firstError.slice(0, 150),
+          yamlOnly: true,
+        });
+        fs.copyFileSync(origPath, path.join(HEALED_DIR, filename));
+        continue;
+      }
+      // Fall through to regular spec-level healing if YAML patch gave nothing.
+    }
+
+    // ── Proactive path B: :text() substring → strict-mode multi-match ────────
     if (strategy === 'locator_yaml_strict') {
       const yamlPatch = healYamlLocator(firstError);
       if (yamlPatch) {

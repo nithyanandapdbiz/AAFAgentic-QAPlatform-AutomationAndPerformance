@@ -9,40 +9,55 @@
  * ─────────────────────────────────────────────────────────────────────────────
  * Runs nine pipeline stages in sequence with no human input:
  *
- *   Stage 1  Fetch Jira story → create DETAILED Zephyr test cases
- *            • Design techniques applied (BVA, EP, DT, ST, EG, UC)
- *            • Concrete test data included in every test case step
+ *   Stage 1   Fetch Jira story → create DETAILED Zephyr test cases
+ *             • Design techniques applied (BVA, EP, DT, ST, EG, UC)
+ *             • Concrete test data included in every test case step
  *
- *   Stage 2  Generate Playwright spec files from Zephyr test cases
+ *   Stage 2   Generate Playwright spec files from Zephyr test cases
  *
- *   Stage 3  Run Playwright tests   (HEADED / UI / browser — default)
- *            → Sync Pass/Fail results to Zephyr
+ *   Stage 3   Run Playwright tests   (HEADED / UI / browser — default)
+ *             → Sync Pass/Fail results to Zephyr
  *
- *   Stage 4  Self-Healing Agent
- *            • Reads failing tests from test-results.json
- *            • Applies automated repair patches (timeout, strict-mode, etc.)
- *            • Re-runs only the healed specs to confirm fixes
+ *   Stage 3.5 Proactive Healer — Chromium browser probe (NEW BUILD DRIFT)
+ *             • Launches headless Chromium, authenticates, visits every page
+ *             • Detects broken / ambiguous locators in POM YAML files
+ *             • Strategies:
+ *               - locator_yaml_strict : :text() substring → 4+ matches
+ *               - locator_yaml_drift  : :text-is() exact  → 0 matches
+ *               (label renamed in new app build)
+ *             • Rewrites YAML atomically with key-derived correct labels
+ *             • Updates Zephyr step descriptions + patches spec files
+ *             • Runs BEFORE Stage 4 so the self-healer sees clean locators
  *
- *   Stage 5  Auto-Create Jira Bugs
- *            • Creates a Jira bug for every remaining failing test
- *            • Links each bug to the parent user story (ISSUE_KEY)
+ *   Stage 4   Self-Healing Agent
+ *             • Reads failing tests from test-results.json
+ *             • Applies automated repair patches:
+ *               - timeout, strict_mode, not_visible, navigation, selector
+ *               - locator_yaml_strict (multi-match :text → :text-is)
+ *               - locator_yaml_drift  (drifted label → key-derived label)
+ *             • Re-runs only the healed specs to confirm fixes
  *
- *   Stage 6  Generate custom HTML report with screenshots
+ *   Stage 5   Auto-Create Jira Bugs
+ *             • Creates a Jira bug for every remaining failing test
+ *             • Links each bug to the parent user story (ISSUE_KEY)
  *
- *   Stage 7  Generate Allure report (interactive drill-down)
+ *   Stage 6   Generate custom HTML report with screenshots
  *
- *   Stage 8  Git Agent — auto-commit + push all changes
+ *   Stage 7   Generate Allure report (interactive drill-down)
+ *
+ *   Stage 8   Git Agent — auto-commit + push all changes
  *
  * ─── Usage ───────────────────────────────────────────────────────────────────
- *   node scripts/qa-run.js                   ← full pipeline (all 8 stages)
- *   node scripts/qa-run.js --skip-story      ← skip stage 1 (use existing Zephyr TCs)
- *   node scripts/qa-run.js --skip-generate   ← skip stages 1+2
- *   node scripts/qa-run.js --run-only        ← stages 3-6 only
- *   node scripts/qa-run.js --force           ← force-recreate Zephyr test cases (stage 1)
- *   node scripts/qa-run.js --skip-heal       ← skip stage 4 (healer)
- *   node scripts/qa-run.js --skip-bugs       ← skip stage 5 (bug creation)
- *   node scripts/qa-run.js --skip-git        ← skip stage 9 (git auto-commit + push)
- *   node scripts/qa-run.js --headless        ← run browser in headless CI mode
+ *   node scripts/qa-run.js                    ← full pipeline (all stages)
+ *   node scripts/qa-run.js --skip-story       ← skip stage 1 (use existing Zephyr TCs)
+ *   node scripts/qa-run.js --skip-generate    ← skip stages 1+2
+ *   node scripts/qa-run.js --run-only         ← stages 3+ only
+ *   node scripts/qa-run.js --force            ← force-recreate Zephyr test cases (stage 1)
+ *   node scripts/qa-run.js --skip-proactive   ← skip stage 3.5 (proactive healer)
+ *   node scripts/qa-run.js --skip-heal        ← skip stage 4 (self-healer)
+ *   node scripts/qa-run.js --skip-bugs        ← skip stage 5 (bug creation)
+ *   node scripts/qa-run.js --skip-git         ← skip stage 8 (git auto-commit + push)
+ *   node scripts/qa-run.js --headless         ← run browser in headless CI mode
  *
  * Stage 1 dedup:  If test cases already exist in Zephyr for this story they are
  * skipped automatically. Use --force to delete and recreate them.
@@ -73,6 +88,13 @@ const useIncludePerf = flags.has('--include-perf');
 // Pass --include-security to run OWASP ZAP + custom security checks after Playwright.
 const useIncludeSecurity = flags.has('--include-security');
 const useNoZap           = flags.has('--no-zap');
+
+// ─── Proactive healer flag ─────────────────────────────────────────────────
+// Stage 3.5: probe every POM YAML page with a real Chromium browser, detect
+// broken / multi-match locators (drift from new application build), and patch
+// the YAML files before the self-healing Stage 4 runs.
+// Skip with --skip-proactive when the AUT is unreachable or for fast-ci runs.
+const skipProactive = flags.has('--skip-proactive');
 
 // ─── Headed / headless mode ────────────────────────────────────────────────
 // Default: HEADED (PW_HEADLESS=false) for full UI/browser visibility.
@@ -174,13 +196,14 @@ const STAGES = [
   {
     num:     4,
     label:   'Self-Healing Agent → repair & re-run failing tests',
-    desc:    'Detects failing tests and applies auto-patches (timeout, strict-mode, navigation, visibility)',
+    desc:    'Strategies: timeout · strict_mode · not_visible · navigation · locator_yaml_strict · locator_yaml_drift',
     script:  'scripts/healer.js',
     skip:    () => flags.has('--skip-heal'),
     skipMsg: 'Healer skipped (pass --skip-heal to always skip)',
     softFail: true,   // partial heal is acceptable
     extraEnv: () => ({
-      PW_HEADLESS: useHeadless ? 'true' : 'false'
+      PW_HEADLESS: useHeadless ? 'true' : 'false',
+      HEALER_SKIP_RUN: 'false',
     })
   },
   {
@@ -229,20 +252,22 @@ async function main() {
     '',
     'Fully autonomous. No prompts. No manual steps.',
     '',
-    `  Mode   : ${useHeadless ? 'Headless (CI)' : 'Headed — UI / Browser (default)'}`,
-    `  Flags  : ${args.length ? args.join('  ') : '(none — running all 8 stages)'}`,
-    `  Issue  : ${process.env.ISSUE_KEY || '(set ISSUE_KEY in .env)'}`,
-    `  Force  : ${useForce ? 'YES — will recreate Zephyr test cases' : 'No (dedup active)'}`,
-    `  Time   : ${now()}`,
+    `  Mode       : ${useHeadless ? 'Headless (CI)' : 'Headed — UI / Browser (default)'}`,
+    `  Flags      : ${args.length ? args.join('  ') : '(none — all stages)'}`,
+    `  Issue      : ${process.env.ISSUE_KEY || '(set ISSUE_KEY in .env)'}`,
+    `  Force      : ${useForce ? 'YES — will recreate Zephyr test cases' : 'No (dedup active)'}`,
+    `  Proactive  : ${skipProactive ? 'SKIPPED (--skip-proactive)' : 'ON — Chromium locator probe'}`,
+    `  Time       : ${now()}`,
     '',
-    '  Stage 1  Detailed test cases  (BVA/EP/DT/ST/EG/UC + test data)',
-    '  Stage 2  Generate Playwright specs',
-    `  Stage 3  Run tests  [${useHeadless ? 'headless' : 'headed/UI/browser'}]  + sync Zephyr`,
-    '  Stage 4  Self-Healing Agent  →  auto-repair failures',
-    '  Stage 5  Auto-create Jira bugs  →  linked to parent story',
-    '  Stage 6  Generate HTML report',
-    '  Stage 7  Generate Allure report',
-    '  Stage 8  Git Agent  →  auto-commit + push',
+    '  Stage 1    Detailed test cases  (BVA/EP/DT/ST/EG/UC + test data)',
+    '  Stage 2    Generate Playwright specs',
+    `  Stage 3    Run tests  [${useHeadless ? 'headless' : 'headed/UI/browser'}]  + sync Zephyr`,
+    '  Stage 3.5  Proactive Healer  →  Chromium probe + YAML locator repair',
+    '  Stage 4    Self-Healing Agent  →  auto-repair failures',
+    '  Stage 5    Auto-create Jira bugs  →  linked to parent story',
+    '  Stage 6    Generate HTML report',
+    '  Stage 7    Generate Allure report',
+    '  Stage 8    Git Agent  →  auto-commit + push',
   ], C.blue);
 
   const summary = [];
@@ -281,6 +306,36 @@ async function main() {
     if (!ok && !isSoftFailure) {
       console.error(`\n${C.red}  Pipeline halted at Stage ${stage.num} (exit ${exitCode}).${C.reset}\n`);
       break;
+    }
+
+    // ── Stage 3.5 — Proactive Healer (after Playwright run, before self-healer) ──
+    // Launches a headless Chromium browser, visits every POM page, probes each
+    // locator, and patches the YAML files for any broken or drifted selector.
+    // This prevents the self-healer from seeing locator-related failures that
+    // can be fixed without spec changes.
+    if (stage.num === 3 && !skipProactive) {
+      const t35 = Date.now();
+      stageHeader('3.5', 'Proactive Healer — Chromium locator probe + YAML repair');
+      console.log(`  ${C.dim}Strategies: locator_yaml_strict (multi-match) · locator_yaml_drift (label renamed)${C.reset}\n`);
+      const ph = require('child_process').spawnSync(
+        'node',
+        [
+          path.join(ROOT, 'scripts', 'proactive-healer.js'),
+          '--standalone',
+          '--skip-zephyr',
+          '--skip-specs',
+          '--skip-run',
+          ...(useHeadless ? [] : []),   // proactive healer always runs headless
+        ],
+        { cwd: ROOT, stdio: 'inherit', env: { ...process.env } }
+      );
+      const ph35ok = (ph.status ?? 1) === 0;
+      stageDone('3.5', 'Proactive Healer — Chromium locator probe + YAML repair', ph35ok, Date.now() - t35);
+      summary.push({
+        num: '3.5', label: 'Proactive Healer — YAML locator repair',
+        status: ph35ok ? 'PASS' : 'WARN',   // non-fatal: AUT may be unreachable
+        dur: Date.now() - t35,
+      });
     }
 
     // ── Stage 3b — generate k6 perf scripts (after Playwright spec generation) ──

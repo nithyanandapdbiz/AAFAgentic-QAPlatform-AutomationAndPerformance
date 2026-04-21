@@ -78,6 +78,158 @@ function writeFileAtomic(filePath, contents) {
   fs.renameSync(tmp, filePath);
 }
 
+// ============================================================================
+// FUZZY TEXT MATCHING HELPERS (Enhancement — Added 2026-04-21)
+// ============================================================================
+
+/**
+ * Calculate Levenshtein distance between two strings.
+ *
+ * @param {string} str1
+ * @param {string} str2
+ * @returns {number} Edit distance (0 = identical).
+ */
+function levenshteinDistance(str1, str2) {
+  const matrix = Array(str2.length + 1).fill(null)
+    .map(() => Array(str1.length + 1).fill(null));
+
+  for (let i = 0; i <= str1.length; i++) matrix[0][i] = i;
+  for (let j = 0; j <= str2.length; j++) matrix[j][0] = j;
+
+  for (let j = 1; j <= str2.length; j++) {
+    for (let i = 1; i <= str1.length; i++) {
+      const indicator = str1[i - 1] === str2[j - 1] ? 0 : 1;
+      matrix[j][i] = Math.min(
+        matrix[j][i - 1] + 1,           // deletion
+        matrix[j - 1][i] + 1,           // insertion
+        matrix[j - 1][i - 1] + indicator // substitution
+      );
+    }
+  }
+
+  return matrix[str2.length][str1.length];
+}
+
+/**
+ * Calculate Levenshtein similarity on a 0–1 scale (1 = identical).
+ *
+ * @param {string} str1
+ * @param {string} str2
+ * @returns {number}
+ */
+function calculateLevenshteinSimilarity(str1, str2) {
+  const longer  = str1.length >= str2.length ? str1 : str2;
+  const shorter = str1.length >= str2.length ? str2 : str1;
+  if (longer.length === 0) return 1.0;
+  const editDistance = levenshteinDistance(longer, shorter);
+  return (longer.length - editDistance) / longer.length;
+}
+
+/**
+ * Attempt to recover a broken text-based locator using fuzzy text matching.
+ * This is an ADDITIONAL recovery strategy that runs AFTER all existing
+ * candidate-based strategies in `healPageObjects` have failed.
+ *
+ * Only activates for selectors containing `:text-is("…")` or `:text-matches("…")`.
+ * When the best matching element's text is ≥ `HEALER_TEXT_SIMILARITY_THRESHOLD`
+ * similar, the new text is substituted into the original selector.
+ *
+ * Configurable via environment variables:
+ *   HEALER_TEXT_SIMILARITY_THRESHOLD  — float 0–1, default 0.70
+ *   HEALER_TEXT_CASE_SENSITIVE        — "true"|"false", default false
+ *
+ * @param {import('playwright').Page} pwPage           Live Playwright page.
+ * @param {string}                    originalSelector  The broken CSS/PW selector.
+ * @param {string}                    locatorKey        Key name for logging only.
+ * @returns {Promise<{newSelector:string, reason:string, confidence:number, method:string}|null>}
+ */
+async function recoverTextBasedLocator(pwPage, originalSelector, locatorKey) {
+  // Only attempt recovery for text-based selectors
+  const textMatch = originalSelector.match(/:text-is\("([^"]+)"\)|:text-matches\("([^"]+)"\)/);
+  if (!textMatch) {
+    logger.debug(`[Fuzzy Text Recovery] Skipping ${locatorKey} — not a text-based selector`);
+    return null;
+  }
+
+  const originalText = textMatch[1] || textMatch[2];
+  const baseSelector = originalSelector.split(/:text-is\(|:text-matches\(/)[0];
+
+  logger.info(`[Fuzzy Text Recovery] Attempting recovery for "${locatorKey}"`);
+  logger.debug(`[Fuzzy Text Recovery] Original text: "${originalText}"`);
+  logger.debug(`[Fuzzy Text Recovery] Base selector: "${baseSelector}"`);
+
+  try {
+    const candidates = await pwPage.locator(baseSelector).all();
+    logger.debug(`[Fuzzy Text Recovery] Found ${candidates.length} candidate element(s)`);
+
+    if (candidates.length === 0) {
+      logger.warn(`[Fuzzy Text Recovery] No elements found with base selector "${baseSelector}"`);
+      return null;
+    }
+
+    const threshold     = parseFloat(process.env.HEALER_TEXT_SIMILARITY_THRESHOLD || '0.70');
+    const caseSensitive = process.env.HEALER_TEXT_CASE_SENSITIVE === 'true';
+
+    let bestMatch      = null;
+    let bestSimilarity = 0;
+
+    for (const candidate of candidates) {
+      const rawText   = await candidate.textContent();
+      const cleanText = (rawText || '').trim();
+      if (!cleanText) continue;
+
+      const s1 = caseSensitive ? cleanText      : cleanText.toLowerCase();
+      const s2 = caseSensitive ? originalText   : originalText.toLowerCase();
+      const similarity = calculateLevenshteinSimilarity(s1, s2);
+
+      logger.debug(
+        `[Fuzzy Text Recovery] Candidate: "${cleanText}" ` +
+        `(similarity: ${(similarity * 100).toFixed(1)}%)`
+      );
+
+      if (similarity > bestSimilarity && similarity >= threshold) {
+        bestMatch      = cleanText;
+        bestSimilarity = similarity;
+      }
+    }
+
+    if (bestMatch) {
+      // Preserve the exact original selector shape — only swap the text atom.
+      const newSelector = originalSelector
+        .replace(/:text-is\("[^"]+"\)/,    `:text-is("${bestMatch}")`)
+        .replace(/:text-matches\("[^"]+"\)/, `:text-is("${bestMatch}")`);
+
+      logger.info(
+        `[Fuzzy Text Recovery] ✓ Recovery successful: ` +
+        `"${originalText}" → "${bestMatch}" ` +
+        `(${(bestSimilarity * 100).toFixed(1)}% similarity)`
+      );
+
+      return {
+        newSelector,
+        reason:     `Text changed from "${originalText}" to "${bestMatch}"`,
+        confidence: bestSimilarity,
+        method:     'fuzzy-text-match',
+      };
+    }
+
+    logger.warn(
+      `[Fuzzy Text Recovery] ✗ No match found for "${originalText}" ` +
+      `(threshold: ${(threshold * 100).toFixed(0)}%)`
+    );
+    return null;
+
+  } catch (err) {
+    logger.warn(`[Fuzzy Text Recovery] Error during recovery for "${locatorKey}": ${err.message}`);
+    return null;
+  }
+}
+
+// ============================================================================
+// END OF FUZZY TEXT MATCHING ENHANCEMENT
+// ============================================================================
+
+
 /**
  * Convert a camelCase locator key to kebab-case for `name=` / `data-testid=`
  * heuristics.  `usernameInput` → `username-input`.
@@ -378,6 +530,17 @@ async function healPageObjects(affectedPages) {
             let c = 0;
             try { c = await pwPage.locator(sel).count(); } catch { c = 0; }
             if (c === 1) { replacement = sel; break; }
+          }
+
+          // Fuzzy text-matching recovery — activates ONLY when all structured
+          // candidates above have failed and the selector contains :text-is/matches.
+          if (!replacement) {
+            const fuzzy = await recoverTextBasedLocator(pwPage, selector, key);
+            if (fuzzy) {
+              let c = 0;
+              try { c = await pwPage.locator(fuzzy.newSelector).count(); } catch { c = 0; }
+              if (c === 1) replacement = fuzzy.newSelector;
+            }
           }
 
           if (replacement) {
@@ -746,4 +909,8 @@ module.exports = {
   updateZephyrTestCases,
   patchSpecFiles,
   runAffectedSpecs,
+  // Exported for unit testing (fuzzy text-matching enhancement)
+  levenshteinDistance,
+  calculateLevenshteinSimilarity,
+  recoverTextBasedLocator,
 };

@@ -129,6 +129,7 @@ jobs:
           HEAL_AFFECTED="${{ steps.proactive-heal.outputs.affected_count || '0' }}"
           HEAL_PAGES="${{ steps.proactive-heal.outputs.affected_pages || '0' }}"
           HEAL_SPECS="${{ steps.proactive-heal.outputs.affected_specs || '0' }}"
+          HEAL_LOCATORS="${{ steps.proactive-heal.outputs.locator_pool || '0' }}"
 
           {
             echo "## Scoped QA — Summary"
@@ -138,6 +139,7 @@ jobs:
             echo "| Proactive heal — affected pages       | ${HEAL_PAGES} |"
             echo "| Proactive heal — affected test cases  | ${HEAL_AFFECTED} |"
             echo "| Proactive heal — affected spec files  | ${HEAL_SPECS} |"
+            echo "| Proactive heal — locators inspected   | ${HEAL_LOCATORS} |"
             if [ -f test-results-healed.json ]; then
               PASSED=$(jq '.stats.expected // 0'  test-results-healed.json)
               FAILED=$(jq '.stats.unexpected // 0' test-results-healed.json)
@@ -180,9 +182,10 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
-            const healAffected = '${{ steps.proactive-heal.outputs.affected_count || '0' }}';
-            const healPages    = '${{ steps.proactive-heal.outputs.affected_pages || '0' }}';
-            const healSpecs    = '${{ steps.proactive-heal.outputs.affected_specs || '0' }}';
+            const healAffected  = '${{ steps.proactive-heal.outputs.affected_count || '0' }}';
+            const healPages     = '${{ steps.proactive-heal.outputs.affected_pages || '0' }}';
+            const healSpecs     = '${{ steps.proactive-heal.outputs.affected_specs || '0' }}';
+            const healLocators  = '${{ steps.proactive-heal.outputs.locator_pool || '0' }}';
             let passed = '0', failed = '0';
             try {
               if (fs.existsSync('test-results.json')) {
@@ -199,6 +202,7 @@ jobs:
               `| Proactive heal — affected pages      | ${healPages} |`,
               `| Proactive heal — affected test cases | ${healAffected} |`,
               `| Proactive heal — specs auto-updated  | ${healSpecs} |`,
+              `| Proactive heal — locators inspected  | ${healLocators} |`,
               `| Scoped run — passed                  | ${passed} |`,
               `| Scoped run — failed                  | ${failed} |`,
               '',

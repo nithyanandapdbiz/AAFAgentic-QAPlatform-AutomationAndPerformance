@@ -35,10 +35,11 @@ module.exports = defineConfig({
   use: {
     baseURL:    'https://opensource-demo.orangehrmlive.com',
     headless,
-    // 'only-on-failure' — ScreenshotHelper already captures at every step;
-    // Playwright's built-in 'on' adds a redundant end-of-test screenshot per test.
-    screenshot: 'only-on-failure',
-    video:      'retain-on-failure',
+    // 'on'  — capture a full-page screenshot at the end of EVERY test (pass or fail).
+    // ScreenshotHelper additionally captures per-step screenshots during execution.
+    screenshot: 'on',
+    // 'on'  — record and RETAIN video for every test (pass or fail).
+    video:      'on',
     trace:      'retain-on-failure',
     launchOptions: {
       slowMo: headless ? 0 : 50   // slight slow-mo in headed mode for visibility
