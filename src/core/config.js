@@ -67,17 +67,75 @@ const perfConfig = {
 })();
 
 // ─── Security Config ──────────────────────────────────────────────────────────
-// Pentest (k6 adversarial probes) is a SECURITY discipline, not a performance one.
-// It runs inside the security pipeline (run-security.js Stage 4) alongside ZAP scans.
-const secConfig = {
-  pentest: {
-    // Server must stay responsive under adversarial traffic (p95/p99 SLAs).
-    p95:       parseInt(process.env.SEC_PENTEST_P95    || '3000',  10),
-    p99:       parseInt(process.env.SEC_PENTEST_P99    || '6000',  10),
-    // High error rate expected: 401/403/429 from auth-rejection / rate-limiting IS correct behavior.
-    errorRate: parseFloat(process.env.SEC_PENTEST_ERROR || '0.80'),
+const secConfig = {};
+
+// ─── Penetration Testing Config ───────────────────────────────────────────────
+const pentestConfig = {
+  enabled:       process.env.PENTEST_ENABLED === 'true',
+  targetUrl:     process.env.PENTEST_TARGET_URL || process.env.BASE_URL || 'http://localhost:3000',
+  allowedHosts:  (process.env.PENTEST_ALLOWED_HOSTS || '')
+                   .split(',').map(h => h.trim().toLowerCase()).filter(Boolean),
+  failOn:        (process.env.PENTEST_FAIL_ON || 'critical').toLowerCase(),
+  warnOn:        (process.env.PENTEST_WARN_ON || 'high').toLowerCase(),
+
+  nuclei: {
+    binary:        process.env.NUCLEI_BINARY         || 'nuclei',
+    templatesPath: process.env.NUCLEI_TEMPLATES_PATH || '',
+    rateLimit:     parseInt(process.env.NUCLEI_RATE_LIMIT  || '50', 10),
+    timeout:       parseInt(process.env.NUCLEI_TIMEOUT     || '10', 10),
+  },
+
+  sqlmap: {
+    binary:     process.env.SQLMAP_BINARY       || 'sqlmap',
+    apiPort:    parseInt(process.env.SQLMAP_API_PORT   || '8778', 10),
+    level:      parseInt(process.env.SQLMAP_LEVEL      || '2', 10),
+    risk:       parseInt(process.env.SQLMAP_RISK       || '2', 10),
+    timeoutMs:  parseInt(process.env.SQLMAP_TIMEOUT_MS || '300000', 10),
+  },
+
+  ffuf: {
+    binary:      process.env.FFUF_BINARY    || 'ffuf',
+    seclistPath: process.env.SECLIST_PATH   || '/usr/share/seclists',
+    rate:        parseInt(process.env.FFUF_RATE    || '100', 10),
+    threads:     parseInt(process.env.FFUF_THREADS || '40', 10),
+  },
+
+  zapAuth: {
+    ignoreSSL:         process.env.ZAP_IGNORE_SSL_ERRORS === 'true',
+    username:          process.env.PENTEST_AUTH_USERNAME     || '',
+    password:          process.env.PENTEST_AUTH_PASSWORD     || '',
+    loginUrl:          process.env.PENTEST_AUTH_LOGIN_URL    || '',
+    usernameField:     process.env.PENTEST_AUTH_USER_FIELD   || 'username',
+    passwordField:     process.env.PENTEST_AUTH_PASS_FIELD   || 'password',
+    loggedInIndicator: process.env.PENTEST_AUTH_LOGGED_IN    || '\\Qsign-out\\E',
+  },
+
+  jira: {
+    cvssFieldId:     process.env.JIRA_CVSS_FIELD_ID      || '',
+    securityLevelId: process.env.JIRA_SECURITY_LEVEL_ID  || '',
   },
 };
+
+// Startup: validate pentest binary availability when PENTEST_ENABLED=true
+(function validatePentestBinaries() {
+  if (!pentestConfig.enabled) return;
+  const { spawnSync } = require('child_process');
+  const binaries = [
+    { name: 'nuclei',  bin: pentestConfig.nuclei.binary,  arg: '-version' },
+    { name: 'sqlmap',  bin: pentestConfig.sqlmap.binary,   arg: '--version' },
+    { name: 'ffuf',    bin: pentestConfig.ffuf.binary,     arg: '-V' },
+  ];
+  for (const { name, bin, arg } of binaries) {
+    try {
+      const r = spawnSync(bin, [arg], { encoding: 'utf8', timeout: 5000 });
+      if (r.error) {
+        console.warn(`[config] WARNING: ${name} binary "${bin}" not found or not executable. Install it or set ${name.toUpperCase()}_BINARY in .env.`);
+      }
+    } catch (e) {
+      console.warn(`[config] WARNING: Could not validate ${name} binary: ${e.message}`);
+    }
+  }
+})();
 
 module.exports = {
   port: process.env.PORT || 3000,
@@ -97,6 +155,7 @@ module.exports = {
   },
   perf: perfConfig,
   sec:  secConfig,
+  pentest: pentestConfig,
   agent: {
     // Minimum confidence required for a planner category to be selected.
     // Also used by QA agent to trigger fallback test cases.

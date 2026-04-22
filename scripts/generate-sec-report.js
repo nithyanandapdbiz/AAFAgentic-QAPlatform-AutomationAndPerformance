@@ -31,16 +31,6 @@ const OWASP_TOP10 = [
 const SEV_ORDER   = { critical:5, high:4, medium:3, low:2, informational:1, info:1 };
 const SEV_WEIGHTS = { critical:10, high:5, medium:2, low:0.5, informational:0, info:0 };
 
-const PENTEST_MODULES = [
-  { key:'apiFuzzing',     label:'API Fuzzing',          icon:'&#128251;' },
-  { key:'authBypass',     label:'Auth Bypass',          icon:'&#128274;' },
-  { key:'idorDetection',  label:'IDOR Detection',       icon:'&#128273;' },
-  { key:'rateLimiting',   label:'Rate Limiting',        icon:'&#9201;'   },
-  { key:'sessionMgmt',    label:'Session Management',  icon:'&#127823;' },
-  { key:'cryptoWeakness', label:'Crypto Weakness',     icon:'&#128275;' },
-  { key:'fileUpload',     label:'File Upload Security', icon:'&#128206;' },
-];
-
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function escHtml(s) {
   if (s == null) return '';
@@ -145,64 +135,12 @@ function buildOwaspHeatmap(findings) {
   return `<div class="owasp-heatmap">${cells.join('')}</div>`;
 }
 
-// ─── Pentest Module Cards ─────────────────────────────────────────────────────
-function buildPentestModuleCards(pentestModules) {
-  if (!pentestModules || !pentestModules.length) {
-    return `<div class="no-data-msg">No automated pentest data available for this scan.</div>`;
-  }
-  const moduleMap = {};
-  for (const m of pentestModules) moduleMap[m.name || m.key] = m;
-
-  return PENTEST_MODULES.map(def => {
-    const mod           = moduleMap[def.key] || {};
-    const status        = mod.status || 'not-run';
-    const findings      = mod.findings || [];
-    const endpoints     = mod.endpointsTested || 0;
-    const duration      = mod.durationMs ? (mod.durationMs / 1000).toFixed(1) + 's' : '\u2014';
-    const attackVectors = (mod.attackVectorsApplied || []).length;
-    const statusClass   = status === 'success' ? 'pt-status-success'
-                        : status === 'partial'  ? 'pt-status-partial'
-                        : status === 'failed'   ? 'pt-status-failed'
-                        : 'pt-status-notrun';
-    const statusLabel   = status === 'success' ? 'Completed' : status === 'partial' ? 'Partial'
-                        : status === 'failed'  ? 'Failed' : 'Not Run';
-
-    const findingsHtml = findings.map(f => {
-      const sev = (f.severity || 'info').toLowerCase();
-      return `<div class="pt-finding-row">
-        <span class="sev-dot sev-dot-${sev}"></span>
-        <span class="pt-finding-name">${escHtml(f.name || f.id)}</span>
-        <span class="pt-finding-cvss">CVSS ${(f.cvss || 0).toFixed(1)}</span>
-      </div>`;
-    }).join('');
-
-    return `<details class="pt-card">
-      <summary>
-        <span class="pt-icon">${def.icon}</span>
-        <span class="pt-card-label">${escHtml(def.label)}</span>
-        <span class="pt-badge ${statusClass}">${statusLabel}</span>
-        <span class="pt-stats">${endpoints} endpoints &middot; ${attackVectors} vectors &middot; ${duration}</span>
-        <span class="pt-finding-count ${findings.length > 0 ? 'has-findings' : ''}">${findings.length} finding${findings.length === 1 ? '' : 's'}</span>
-        <span class="pt-chevron">&#9660;</span>
-      </summary>
-      <div class="pt-card-body">
-        ${findings.length > 0
-          ? `<div class="pt-findings-list">${findingsHtml}</div>`
-          : '<div class="no-data-msg">No findings identified by this module.</div>'}
-        ${mod.attackVectorsApplied && mod.attackVectorsApplied.length
-          ? `<div class="pt-vectors"><span class="field-label-e">Attack vectors: </span>${mod.attackVectorsApplied.map(v => `<code class="code-tag">${escHtml(v)}</code>`).join(' ')}</div>`
-          : ''}
-      </div>
-    </details>`;
-  }).join('');
-}
-
 // ─── Finding Card ─────────────────────────────────────────────────────────────
 function buildFindingCard(f, idx) {
   const sev       = (f.severity || 'informational').toLowerCase();
   const src       = (f.source   || 'zap').toLowerCase();
-  const layerLabel = src === 'pentest' ? 'Pentest' : src === 'custom' ? 'Custom' : 'ZAP';
-  const layerClass = src === 'pentest' ? 'pentest' : src === 'custom' ? 'custom' : 'zap';
+  const layerLabel = src === 'custom' ? 'Custom' : 'ZAP';
+  const layerClass = src === 'custom' ? 'custom' : 'zap';
 
   const sevLabel  = { critical:'Critical', high:'High', medium:'Medium', low:'Low', informational:'Informational' };
 
@@ -282,7 +220,7 @@ function buildFindingCard(f, idx) {
             <div class="meta-row-e"><span class="meta-lbl-e">CVSS v3.1</span><span>${(f.cvss || 0).toFixed(1)} &nbsp;<code class="code-tag">${escHtml(f.cvssVector)}</code></span></div>
             <div class="meta-row-e"><span class="meta-lbl-e">CWE</span><span>${escHtml(f.cwe)} \u2014 ${escHtml(f.cweName)}</span></div>
             <div class="meta-row-e"><span class="meta-lbl-e">Jira Bug</span><span>${jiraBug}</span></div>
-            ${f.pentestModule ? `<div class="meta-row-e"><span class="meta-lbl-e">Pentest Module</span><span>${escHtml(f.pentestModule)}</span></div>` : ''}
+
           </div>
           ${attackHtml}
         </div>
@@ -295,55 +233,6 @@ function buildFindingCard(f, idx) {
         ? `<div class="refs-row">References: ${refsHtml}</div>` : ''}
     </div>
   </details>`;
-}
-
-// ─── Human Pentest Guide ──────────────────────────────────────────────────────
-function buildPentestGuide() {
-  const sections = [
-    { title:'Reconnaissance', num:'01', steps:[
-      'Map all API endpoints using ZAP spider or Burp Suite crawl.',
-      'Identify authentication mechanisms: JWT, session cookies, OAuth tokens.',
-      'Enumerate user roles and privilege levels from API documentation or client-side JS.',
-      'Review robots.txt, sitemap.xml, .well-known endpoints for information leakage.',
-    ]},
-    { title:'Authentication Testing', num:'02', steps:[
-      'Test brute-force resistance: attempt >10 failed logins and verify 429/lockout response.',
-      'Test password reset flows for token predictability and expiry enforcement.',
-      'Verify JWT signature: attempt alg:none attack; check expiry and secret strength.',
-      'Test multi-factor authentication bypass, recovery code exhaustion, and session persistence.',
-    ]},
-    { title:'Authorization & IDOR', num:'03', steps:[
-      'Replace your user ID in every API request with another known user ID and observe response.',
-      'Test horizontal privilege escalation across all resource types (employees, documents, orders).',
-      'Attempt vertical privilege escalation: call admin endpoints as a standard user.',
-      'Test parameter manipulation: ?admin=true, ?role=admin, X-User-ID header injection.',
-    ]},
-    { title:'Injection Testing', num:'04', steps:[
-      'Test SQL injection in all query parameters, request headers, and JSON body fields.',
-      'Test XSS (stored, reflected, DOM-based) in all input fields and URL parameters.',
-      'Test command injection in file upload names, URL paths, and dynamic form fields.',
-      'Test SSTI in template-rendered fields and error messages.',
-    ]},
-    { title:'Session Management', num:'05', steps:[
-      'Capture session tokens and analyse for predictability, entropy, and pattern.',
-      'Test session fixation: set a pre-authentication token and verify replacement post-login.',
-      'Verify Secure, HttpOnly, and SameSite=Strict flags on all authentication cookies.',
-      'Test session invalidation: verify all tokens are rejected server-side after logout.',
-    ]},
-    { title:'Business Logic', num:'06', steps:[
-      'Test negative quantities, boundary values, and unexpected data types in all forms.',
-      'Replay completed transaction requests to verify idempotency enforcement.',
-      'Attempt workflow bypass: skip steps in multi-step processes (checkout, approval flows).',
-      'Attempt cross-tenant access: access resources belonging to a different organisational tenant.',
-    ]},
-  ];
-  return sections.map(s => `<div class="guide-section">
-    <div class="guide-section-hdr">
-      <span class="guide-num">${s.num}</span>
-      <span class="guide-section-title">${escHtml(s.title)}</span>
-    </div>
-    <ul class="guide-steps">${s.steps.map(step => `<li>${escHtml(step)}</li>`).join('')}</ul>
-  </div>`).join('');
 }
 
 // ─── Compliance Section ───────────────────────────────────────────────────────
@@ -387,6 +276,100 @@ function buildComplianceSection(findings) {
   </table>`;
 }
 
+// ─── Recommendations Builder ──────────────────────────────────────────────────
+function buildRecommendations(findings, score) {
+  const SEV_ORDER_L = { critical:5, high:4, medium:3, low:2, informational:1, info:1 };
+
+  // Group findings by priority based on severity
+  const p0 = findings.filter(f => (f.remediation && f.remediation.priority === 'P0') || (SEV_ORDER_L[(f.severity||'').toLowerCase()] || 0) >= 5);
+  const p1 = findings.filter(f => (f.remediation && f.remediation.priority === 'P1') || (!p0.includes(f) && (SEV_ORDER_L[(f.severity||'').toLowerCase()] || 0) >= 4));
+  const p2 = findings.filter(f => (f.remediation && f.remediation.priority === 'P2') || (!p0.includes(f) && !p1.includes(f) && (SEV_ORDER_L[(f.severity||'').toLowerCase()] || 0) >= 3));
+  const p3 = findings.filter(f => !p0.includes(f) && !p1.includes(f) && !p2.includes(f));
+
+  const riskColor = score >= 80 ? 'var(--s-pass)' : score >= 60 ? 'var(--c-m)' : score >= 40 ? 'var(--c-h)' : 'var(--c-c)';
+  const riskLabel = score >= 80 ? 'Low Risk' : score >= 60 ? 'Moderate Risk' : score >= 40 ? 'High Risk' : 'Critical Risk';
+
+  function remBlock(priority, label, color, bgColor, items, timeframe) {
+    if (!items.length) return '';
+    return `<div class="rec-group">
+      <div class="rec-group-hdr" style="border-left:4px solid ${color};background:${bgColor}">
+        <span class="rec-priority" style="color:${color}">${priority}</span>
+        <span class="rec-label">${label}</span>
+        <span class="rec-timeframe">${timeframe}</span>
+        <span class="rec-count" style="color:${color}">${items.length} action${items.length > 1 ? 's' : ''}</span>
+      </div>
+      ${items.map(f => {
+        const rem = f.remediation || {};
+        const sev = (f.severity || 'informational').toLowerCase();
+        return `<div class="rec-item">
+          <div class="rec-item-hdr">
+            <span class="sev-badge-dark sev-${sev}">${sev.charAt(0).toUpperCase()+sev.slice(1)}</span>
+            <span class="cvss-pill">CVSS ${(f.cvss || 0).toFixed(1)}</span>
+            <strong class="rec-item-title">${escHtml(f.name)}</strong>
+            ${f.owaspId ? `<span class="owasp-id-tag">${escHtml(f.owaspId)}</span>` : ''}
+            ${f.cwe     ? `<code class="code-tag">${escHtml(f.cwe)}</code>` : ''}
+          </div>
+          ${rem.shortTermFix ? `<div class="rec-fix"><span class="rec-fix-lbl rec-fix-immediate">Immediate fix</span><span>${escHtml(rem.shortTermFix)}</span></div>` : ''}
+          ${rem.permanentFix ? `<div class="rec-fix"><span class="rec-fix-lbl rec-fix-permanent">Long-term fix</span><span>${escHtml(rem.permanentFix)}</span></div>` : ''}
+          ${f.steps && f.steps.length ? `<details class="rec-steps-detail">
+            <summary style="cursor:pointer;font-size:11px;color:var(--accent);margin-top:.4rem">&#9654; Remediation steps (${f.steps.length})</summary>
+            <ol class="rec-steps-list">${f.steps.map(s => `<li>${escHtml(s)}</li>`).join('')}</ol>
+          </details>` : ''}
+          ${f.references && f.references.length ? `<div class="refs-row">References: ${f.references.map(r => `<a href="${escHtml(r.url)}" target="_blank" rel="noopener noreferrer" class="ref-link">${escHtml(r.label)}</a>`).join(' &middot; ')}</div>` : ''}
+        </div>`;
+      }).join('')}
+    </div>`;
+  }
+
+  const standards = [
+    { name:'OWASP Top 10 (2021)',                url:'https://owasp.org/www-project-top-ten/' },
+    { name:'CVSS v3.1',                          url:'https://www.first.org/cvss/v3.1/specification-document' },
+    { name:'CWE/SANS Top 25',                    url:'https://cwe.mitre.org/top25/' },
+    { name:'NIST SP 800-115',                    url:'https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-115.pdf' },
+    { name:'ISO/IEC 27001',                      url:'https://www.iso.org/isoiec-27001-information-security.html' },
+    { name:'PCI DSS v4.0 Req 6 (Secure Systems)',url:'https://www.pcisecuritystandards.org/' },
+  ];
+
+  return `<div class="rec-overview">
+    <div class="rec-overview-score">
+      <span style="font-size:32px;font-weight:700;color:${riskColor}">${score}</span>
+      <span style="font-size:12px;color:${riskColor};font-weight:600">${riskLabel}</span>
+    </div>
+    <div class="rec-overview-text">
+      <div class="rec-overview-title">Overall Remediation Assessment</div>
+      <p>This assessment identified <strong>${findings.length} security finding${findings.length !== 1 ? 's' : ''}</strong> across
+      ${new Set(findings.map(f => f.owaspId || '').filter(Boolean)).size} OWASP Top 10 (2021) categories.
+      ${p0.length > 0 ? `<strong style="color:var(--c-c)">${p0.length} critical-priority finding${p0.length !== 1 ? 's' : ''}</strong> require${p0.length === 1 ? 's' : ''} immediate action before the next production deployment.` : 'No critical-priority findings are present.'}
+      ${p1.length > 0 ? ` <strong style="color:var(--c-h)">${p1.length} high-priority finding${p1.length !== 1 ? 's' : ''}</strong> should be remediated within the current sprint.` : ''}
+      </p>
+    </div>
+    <div class="rec-standards-box">
+      <div class="rec-standards-title">Standards &amp; Frameworks Applied</div>
+      <ul class="rec-standards-list">${standards.map(s =>
+        `<li><a href="${escHtml(s.url)}" target="_blank" rel="noopener noreferrer">${escHtml(s.name)}</a></li>`
+      ).join('')}</ul>
+    </div>
+  </div>
+
+  <div class="rec-sla-table">
+    <table class="compliance-table">
+      <thead><tr><th>Priority</th><th>Criteria</th><th>SLA / Timeframe</th><th>Findings</th></tr></thead>
+      <tbody>
+        <tr><td><span class="priority-badge priority-p0">P0 — Critical</span></td><td>Exploitable with direct impact on confidentiality, integrity, or availability</td><td style="color:var(--c-c);font-weight:700">Before next deployment</td><td class="tc">${p0.length}</td></tr>
+        <tr><td><span class="priority-badge priority-p1">P1 — High</span></td><td>High likelihood of exploitation; significant data or access risk</td><td style="color:var(--c-h);font-weight:700">Within current sprint (≤ 2 weeks)</td><td class="tc">${p1.length}</td></tr>
+        <tr><td><span class="priority-badge priority-p2">P2 — Medium</span></td><td>Moderate risk; requires planned remediation</td><td style="color:var(--c-m);font-weight:700">Within 30 days</td><td class="tc">${p2.length}</td></tr>
+        <tr><td><span class="priority-badge priority-p3">P3 — Low/Info</span></td><td>Low risk; best practice improvements</td><td style="color:var(--c-l);font-weight:700">Next release cycle (≤ 90 days)</td><td class="tc">${p3.length}</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  ${remBlock('P0','Critical — Immediate Action Required','var(--c-c)','var(--c-c-bg)',p0,'Before next deployment')}
+  ${remBlock('P1','High — Current Sprint','var(--c-h)','var(--c-h-bg)',p1,'Within 2 weeks')}
+  ${remBlock('P2','Medium — Planned Remediation','var(--c-m)','var(--c-m-bg)',p2,'Within 30 days')}
+  ${remBlock('P3','Low / Informational','var(--c-l)','var(--c-l-bg)',p3,'Within 90 days')}
+  ${findings.length === 0 ? '<div class="no-data-msg">No findings to remediate. All security checks passed.</div>' : ''}`;
+}
+
 // ─── Master HTML Builder ──────────────────────────────────────────────────────
 function buildHtml(reportData) {
   const { findings, verdict, storyKey, meta, chartJsSrc, score } = reportData;
@@ -407,22 +390,14 @@ function buildHtml(reportData) {
                        : verdict === 'warn' ? 'Medium severity findings require attention'
                        : 'Critical or high severity findings demand immediate remediation';
 
-  const pentestModules      = m.pentestModules || [];
-  const totalPentestFindgs  = pentestModules.reduce((sum, pm) => sum + (pm.findings || []).length, 0);
-  const pentestDurationSec  = m.pentestDurationMs ? (m.pentestDurationMs / 1000).toFixed(0) : null;
-  const pentestTotalVectors = m.pentestTotalAttackVectors || 0;
-  const pentestSuccessRate  = m.pentestSuccessfulExploits && pentestTotalVectors
-    ? ((m.pentestSuccessfulExploits / pentestTotalVectors) * 100).toFixed(1) : null;
-
   const sortedFindings = [...findings].sort((a, b) => {
     const sd = (SEV_ORDER[b.severity] || 0) - (SEV_ORDER[a.severity] || 0);
     return sd !== 0 ? sd : (b.cvss || 0) - (a.cvss || 0);
   });
 
   const layers = {
-    zap:     { critical:0, high:0, medium:0, low:0, informational:0 },
-    custom:  { critical:0, high:0, medium:0, low:0, informational:0 },
-    pentest: { critical:0, high:0, medium:0, low:0, informational:0 },
+    zap:    { critical:0, high:0, medium:0, low:0, informational:0 },
+    custom: { critical:0, high:0, medium:0, low:0, informational:0 },
   };
   for (const f of findings) {
     const src = (f.source || 'zap').toLowerCase();
@@ -432,26 +407,21 @@ function buildHtml(reportData) {
 
   const historicalScans = m.historicalScans || [];
 
-  const findingCardsHtml   = sortedFindings.map((f, i) => buildFindingCard(f, i)).join('');
-  const pentestModuleCards = buildPentestModuleCards(pentestModules);
-  const pentestGuideHtml   = buildPentestGuide();
-  const complianceHtml     = buildComplianceSection(findings);
+  const findingCardsHtml    = sortedFindings.map((f, i) => buildFindingCard(f, i)).join('');
+  const complianceHtml      = buildComplianceSection(findings);
   const owaspHeatmapHtml   = buildOwaspHeatmap(findings);
   const svgGauge           = buildSvgGauge(score);
+  const recommendationsHtml = buildRecommendations(sortedFindings, score);
 
-  const FINDINGS_JSON         = JSON.stringify(findings.map(f => ({
+  const FINDINGS_JSON   = JSON.stringify(findings.map(f => ({
     severity: (f.severity || 'informational').toLowerCase(),
     cvss:     f.cvss || 0,
     owaspId:  f.owaspId || '',
     source:   (f.source || 'zap').toLowerCase(),
   })));
-  const COUNTS_JSON           = JSON.stringify(counts);
-  const LAYERS_JSON           = JSON.stringify(layers);
-  const HISTORICAL_JSON       = JSON.stringify(historicalScans);
-  const PENTEST_COVERAGE_JSON = JSON.stringify(PENTEST_MODULES.map(def => {
-    const mod = pentestModules.find(pm => (pm.name || pm.key) === def.key) || {};
-    return { label: def.label, endpoints: mod.endpointsTested || 0, findings: (mod.findings || []).length };
-  }));
+  const COUNTS_JSON     = JSON.stringify(counts);
+  const LAYERS_JSON     = JSON.stringify(layers);
+  const HISTORICAL_JSON = JSON.stringify(historicalScans);
 
   function metaRowHtml(label, value) {
     if (value == null || value === '' || value === '\u2014') return '';
@@ -466,12 +436,32 @@ function buildHtml(reportData) {
   const maxCvss    = findings.reduce((mx, f) => Math.max(mx, f.cvss || 0), 0);
   const owaspCount = new Set(findings.filter(f => f.owaspId).map(f => f.owaspId.split(':')[0])).size;
 
+  // Executive narrative (requires maxCvss, counts, score)
+  const critHigh  = counts.critical + counts.high;
+  const riskLabel = score >= 80 ? 'low' : score >= 60 ? 'moderate' : score >= 40 ? 'high' : 'critical';
+  const execNarrative = `<div class="exec-narrative">
+    <div class="exec-narrative-title">Executive Risk Summary</div>
+    <p>This security and penetration testing assessment of <strong>${escHtml(m.targetUrl || storyKey)}</strong>
+    conducted on <strong>${formatTimestamp(m.startTime || new Date().toISOString())}</strong>
+    identified a total of <strong>${counts.total} security finding${counts.total !== 1 ? 's' : ''}</strong>
+    producing an overall risk score of <strong>${score}/100</strong> — rated <strong>${riskLabel.toUpperCase()} RISK</strong>.</p>
+    ${critHigh > 0
+      ? `<p><strong style="color:var(--c-c)">${critHigh} Critical/High severity finding${critHigh !== 1 ? 's' : ''}</strong>
+         require${critHigh === 1 ? 's' : ''} immediate attention prior to the next production deployment.
+         ${counts.critical > 0 ? `The most severe issue carries a CVSS score of ${maxCvss.toFixed(1)} and is mapped to <strong>${escHtml(sortedFindings[0]?.owaspId || '')}</strong>.` : ''}</p>`
+      : `<p>No Critical or High severity findings were identified in this scan.</p>`}
+    <p>Assessment coverage: <strong>OWASP ZAP ${escHtml(m.zapVersion || '')}</strong> (${escHtml(m.scanType || 'automated scan')})
+    + <strong>${m.customChecksRun || 0} custom security checks</strong>.
+    Findings are mapped to <strong>OWASP Top 10 (2021)</strong>, <strong>CVSS v3.1</strong>, and <strong>CWE</strong> standards.
+    Refer to the <em>Recommendations</em> tab for a prioritised remediation roadmap with P0–P3 classifications and SLA timeframes.</p>
+  </div>`;
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Security Assessment \u2014 ${escHtml(storyKey)}</title>
+<title>Security Assessment — ${escHtml(storyKey)}</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;1,400&family=JetBrains+Mono:wght@400;500&display=swap');
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -581,7 +571,6 @@ a:hover{text-decoration:underline}
 .layer-badge{display:inline-block;font-size:10px;font-weight:600;padding:2px 8px;border-radius:4px;border-width:1px;border-style:solid}
 .layer-badge.zap{background:#f0eeff;color:#5b21b6;border-color:#c4b5fd}
 .layer-badge.custom{background:#fff4e6;color:#c2410c;border-color:#fdba74}
-.layer-badge.pentest{background:#fdf2f8;color:#be185d;border-color:#f9a8d4}
 
 /* Finding cards */
 .finding-card{background:var(--card);border:1px solid var(--border);border-left-width:4px;border-radius:var(--r);margin-bottom:8px;overflow:hidden;box-shadow:var(--shadow);transition:box-shadow .2s}
@@ -640,41 +629,6 @@ a:hover{text-decoration:underline}
 .sev-dot-critical{background:var(--c-c)} .sev-dot-high{background:var(--c-h)} .sev-dot-medium{background:var(--c-m)}
 .sev-dot-low{background:var(--c-l)} .sev-dot-informational,.sev-dot-info{background:var(--c-i)}
 
-/* Pentest cards */
-.pt-card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);margin-bottom:8px;overflow:hidden;box-shadow:var(--shadow);transition:box-shadow .2s}
-.pt-card:hover{box-shadow:var(--shadow2)}
-.pt-card[open]{border-color:var(--border2)}
-.pt-card summary{padding:.85rem 1rem;cursor:pointer;display:flex;align-items:center;gap:10px;list-style:none;user-select:none;flex-wrap:wrap}
-.pt-card summary::-webkit-details-marker{display:none}
-.pt-card[open] summary{border-bottom:1px solid var(--border)}
-.pt-card[open] summary .pt-chevron{transform:rotate(180deg)}
-.pt-chevron{font-size:10px;transition:transform .18s ease;color:var(--g300);margin-left:auto;flex-shrink:0}
-.pt-icon{font-size:16px;flex-shrink:0;line-height:1}
-.pt-card-label{font-weight:600;color:var(--g800);flex-shrink:0;font-size:13px}
-.pt-stats{font-size:11px;color:var(--g400)}
-.pt-finding-count{font-size:11px;font-weight:700;padding:2px 9px;border-radius:4px;background:var(--g100);color:var(--g500);border:1px solid var(--border)}
-.pt-finding-count.has-findings{background:var(--c-c-bg);color:var(--c-c);border-color:var(--c-c-br)}
-.pt-badge{font-size:10px;font-weight:700;padding:2px 9px;border-radius:4px;border-width:1px;border-style:solid}
-.pt-status-success{background:var(--s-pass-bg);color:var(--s-pass);border-color:var(--s-pass-br)}
-.pt-status-partial{background:var(--s-warn-bg);color:var(--s-warn);border-color:var(--s-warn-br)}
-.pt-status-failed{background:var(--s-fail-bg);color:var(--s-fail);border-color:var(--s-fail-br)}
-.pt-status-notrun{background:var(--g100);color:var(--g400);border-color:var(--border)}
-.pt-card-body{padding:1rem 1.2rem;background:var(--g50);font-size:12px}
-.pt-findings-list{display:flex;flex-direction:column;gap:5px;margin-bottom:.75rem}
-.pt-finding-row{display:flex;align-items:center;gap:8px;padding:.4rem .7rem;background:var(--card);border:1px solid var(--border);border-radius:var(--r);box-shadow:var(--shadow)}
-.pt-finding-name{flex:1;color:var(--g700);font-weight:500}
-.pt-finding-cvss{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--g400);flex-shrink:0}
-.pt-vectors{margin-top:.5rem;display:flex;flex-wrap:wrap;gap:5px;align-items:center}
-
-/* Guide */
-.guide-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px}
-.guide-section{background:var(--card);border:1px solid var(--border);border-radius:var(--r2);padding:1.1rem 1.2rem;box-shadow:var(--shadow)}
-.guide-section-hdr{display:flex;align-items:center;gap:10px;margin-bottom:.75rem;padding-bottom:.65rem;border-bottom:1px solid var(--border)}
-.guide-num{width:26px;height:26px;border-radius:50%;background:var(--accent);color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0}
-.guide-section-title{font-size:13px;font-weight:700;color:var(--g800)}
-.guide-steps{padding-left:1.2rem;display:flex;flex-direction:column;gap:.45rem}
-.guide-steps li{font-size:12px;color:var(--g600);line-height:1.65}
-
 /* Compliance */
 .compliance-summary{display:flex;gap:12px;margin-bottom:1.25rem;flex-wrap:wrap}
 .compliance-stat{display:flex;flex-direction:column;align-items:center;background:var(--card);border:1px solid var(--border);border-radius:var(--r2);padding:1rem 1.75rem;box-shadow:var(--shadow);min-width:130px}
@@ -720,17 +674,50 @@ a:hover{text-decoration:underline}
 .report-footer{display:flex;justify-content:space-between;align-items:center;border-top:1px solid var(--border);padding:1rem 2rem;font-size:11px;color:var(--g400);flex-wrap:wrap;gap:.5rem;background:var(--card)}
 .footer-conf{font-size:10px;font-weight:600;letter-spacing:.06em;color:var(--g300);text-transform:uppercase}
 
+/* Recommendations */
+.rec-overview{display:grid;grid-template-columns:auto 1fr auto;gap:16px;align-items:start;margin-bottom:1.5rem;background:var(--card);border:1px solid var(--border);border-radius:var(--r2);padding:1.25rem;box-shadow:var(--shadow)}
+.rec-overview-score{display:flex;flex-direction:column;align-items:center;padding:.75rem 1.5rem;border-right:1px solid var(--border);gap:2px;min-width:90px}
+.rec-overview-title{font-size:12px;font-weight:700;color:var(--g700);margin-bottom:.4rem}
+.rec-overview-text p{font-size:12px;color:var(--g600);line-height:1.75}
+.rec-standards-box{border-left:1px solid var(--border);padding-left:1.25rem;min-width:200px}
+.rec-standards-title{font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--g400);font-weight:700;margin-bottom:.5rem}
+.rec-standards-list{list-style:none;padding:0;display:flex;flex-direction:column;gap:4px}
+.rec-standards-list li{font-size:11px}
+.rec-sla-table{margin-bottom:1.5rem}
+.rec-group{margin-bottom:1.25rem;border:1px solid var(--border);border-radius:var(--r2);overflow:hidden;box-shadow:var(--shadow)}
+.rec-group-hdr{padding:.75rem 1.1rem;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.rec-priority{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;flex-shrink:0}
+.rec-label{font-size:12px;font-weight:700;color:var(--g800);flex:1}
+.rec-timeframe{font-size:11px;color:var(--g500);font-style:italic;flex-shrink:0}
+.rec-count{font-size:11px;font-weight:700;flex-shrink:0}
+.rec-item{background:var(--card);border-top:1px solid var(--border);padding:.9rem 1.1rem;display:flex;flex-direction:column;gap:.35rem;font-size:12px}
+.rec-item-hdr{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:.2rem}
+.rec-item-title{flex:1;font-weight:600;color:var(--g800);font-size:13px}
+.rec-fix{display:flex;gap:8px;align-items:baseline;padding:.25rem 0;border-top:1px solid var(--g100)}
+.rec-fix-lbl{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;padding:2px 7px;border-radius:4px;white-space:nowrap;flex-shrink:0}
+.rec-fix-immediate{background:var(--c-c-bg);color:var(--c-c)}
+.rec-fix-permanent{background:var(--s-pass-bg);color:var(--s-pass)}
+.rec-steps-detail summary::-webkit-details-marker{display:none}
+.rec-steps-list{margin-top:.4rem;padding-left:1.4rem;display:flex;flex-direction:column;gap:.3rem;color:var(--g600);font-size:11px;line-height:1.6}
+
+/* Exec narrative */
+.exec-narrative{background:var(--card);border:1px solid var(--border);border-radius:var(--r2);padding:1.25rem;margin-bottom:1.5rem;box-shadow:var(--shadow)}
+.exec-narrative-title{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--accent);margin-bottom:.75rem;padding-bottom:.5rem;border-bottom:1px solid var(--border)}
+.exec-narrative p{font-size:12px;color:var(--g600);line-height:1.8;margin-bottom:.5rem}
+.exec-narrative p:last-child{margin-bottom:0}
+.exec-narrative strong{color:var(--g800)}
+
 /* Print */
 @media print{
   .cls-bar,.top-nav,.filter-bar,.btn-action{display:none!important}
   .tab-panel{display:block!important}
   body{background:#fff}
-  .report-header,.chart-card,.kpi-card,.meta-section,.guide-section,.finding-card,.pt-card,.compliance-table{box-shadow:none!important}
+  .report-header,.chart-card,.kpi-card,.meta-section,.finding-card,.compliance-table{box-shadow:none!important}
   .evidence-dark{background:#f1f5f9!important;color:#334155!important;border:1px solid #e2e8f0}
-  .finding-card,.pt-card{page-break-inside:avoid}
+  .finding-card,.rec-item{page-break-inside:avoid}
 }
 @media(max-width:768px){
-  .exec-dashboard,.finding-grid,.meta-2col,.risk-panel{grid-template-columns:1fr}
+  .exec-dashboard,.finding-grid,.meta-2col,.risk-panel,.rec-overview{grid-template-columns:1fr}
   .rh-inner,.section-pad{padding:1.25rem}
 }
 </style>
@@ -753,10 +740,9 @@ a:hover{text-decoration:underline}
   <div class="nav-tabs" role="tablist">
     <button class="nav-tab active" id="ntab-exec"       role="tab" aria-selected="true"  aria-controls="tab-exec"       onclick="showTab('exec',this)">Executive Summary</button>
     <button class="nav-tab"        id="ntab-owasp"      role="tab" aria-selected="false" aria-controls="tab-owasp"      onclick="showTab('owasp',this)">OWASP Top 10</button>
-    <button class="nav-tab"        id="ntab-pentest"    role="tab" aria-selected="false" aria-controls="tab-pentest"    onclick="showTab('pentest',this)">Pentest Results</button>
-    <button class="nav-tab"        id="ntab-guide"      role="tab" aria-selected="false" aria-controls="tab-guide"      onclick="showTab('guide',this)">Pentest Guide</button>
     <button class="nav-tab"        id="ntab-findings"   role="tab" aria-selected="false" aria-controls="tab-findings"   onclick="showTab('findings',this)">All Findings</button>
     <button class="nav-tab"        id="ntab-compliance" role="tab" aria-selected="false" aria-controls="tab-compliance" onclick="showTab('compliance',this)">Compliance</button>
+    <button class="nav-tab"        id="ntab-recs"       role="tab" aria-selected="false" aria-controls="tab-recs"       onclick="showTab('recs',this)">Recommendations</button>
     <button class="nav-tab"        id="ntab-meta"       role="tab" aria-selected="false" aria-controls="tab-meta"       onclick="showTab('meta',this)">Scan Details</button>
   </div>
   <div class="nav-actions">
@@ -776,7 +762,6 @@ a:hover{text-decoration:underline}
         Assessed: <strong>${formatTimestamp(m.startTime)}</strong><br>
         Engine: OWASP ZAP ${escHtml(m.zapVersion || '\u2014')} (${escHtml(m.scanType || '\u2014')})
         &nbsp;+&nbsp; ${m.customChecksRun || 0} custom checks
-        ${pentestModules.length ? ` &nbsp;+&nbsp; ${pentestModules.length} pentest modules` : ''}
         &nbsp;&middot;&nbsp; OWASP Top&nbsp;10 (2021) &nbsp;&middot;&nbsp; CVSS&nbsp;v3.1
       </div>
     </div>
@@ -792,6 +777,7 @@ a:hover{text-decoration:underline}
 
 <!-- ══ TAB 1: EXECUTIVE SUMMARY ══════════════════════════════════════════════ -->
 <section id="tab-exec" class="tab-panel active section-pad" role="tabpanel" aria-labelledby="ntab-exec">
+  ${execNarrative}
   <div class="section-hdr">Key metrics</div>
   <div class="kpi-grid">
     <div class="kpi-card"><div class="kpi-label">Risk Score</div><div class="kpi-value kv-score">${score}</div></div>
@@ -801,8 +787,6 @@ a:hover{text-decoration:underline}
     <div class="kpi-card"><div class="kpi-label">Low</div><div class="kpi-value kv-low">${counts.low}</div></div>
     <div class="kpi-card"><div class="kpi-label">Informational</div><div class="kpi-value kv-info">${counts.informational}</div></div>
     <div class="kpi-card"><div class="kpi-label">Total Findings</div><div class="kpi-value kv-total">${counts.total}</div></div>
-    ${pentestTotalVectors ? `<div class="kpi-card"><div class="kpi-label">Attack Vectors</div><div class="kpi-value kv-info">${pentestTotalVectors.toLocaleString()}</div></div>` : ''}
-    ${pentestSuccessRate !== null ? `<div class="kpi-card"><div class="kpi-label">Exploit Rate</div><div class="kpi-value kv-critical">${pentestSuccessRate}%</div></div>` : ''}
   </div>
 
   <div class="risk-panel">
@@ -868,29 +852,6 @@ a:hover{text-decoration:underline}
   </div>
 </section>
 
-<!-- ══ TAB 3: PENTEST RESULTS ════════════════════════════════════════════════ -->
-<section id="tab-pentest" class="tab-panel section-pad" role="tabpanel" aria-labelledby="ntab-pentest">
-  <div class="section-hdr">Automated pentest summary</div>
-  <div class="kpi-grid" style="grid-template-columns:repeat(auto-fill,minmax(140px,1fr))">
-    <div class="kpi-card"><div class="kpi-label">Modules Run</div><div class="kpi-value kv-total">${pentestModules.length}</div></div>
-    ${totalPentestFindgs > 0 ? `<div class="kpi-card"><div class="kpi-label">PT Findings</div><div class="kpi-value kv-critical">${totalPentestFindgs}</div></div>` : ''}
-    ${pentestDurationSec ? `<div class="kpi-card"><div class="kpi-label">Duration</div><div class="kpi-value kv-score">${pentestDurationSec}s</div></div>` : ''}
-    ${pentestTotalVectors ? `<div class="kpi-card"><div class="kpi-label">Vectors Used</div><div class="kpi-value kv-info">${pentestTotalVectors.toLocaleString()}</div></div>` : ''}
-  </div>
-  <div class="section-hdr">Endpoint coverage by module</div>
-  <div class="chart-card" style="margin-bottom:1.5rem">
-    <div class="chart-card-title">Endpoints tested vs findings per module</div>
-    <div class="chart-wrap" style="height:210px"><canvas id="chart-pentest-coverage"></canvas></div>
-  </div>
-  <div class="section-hdr">Module results</div>
-  ${pentestModuleCards}
-</section>
-
-<!-- ══ TAB 4: PENTEST GUIDE ══════════════════════════════════════════════════ -->
-<section id="tab-guide" class="tab-panel section-pad" role="tabpanel" aria-labelledby="ntab-guide">
-  <div class="section-hdr">Manual penetration testing methodology</div>
-  <div class="guide-grid">${pentestGuideHtml}</div>
-</section>
 
 <!-- ══ TAB 5: ALL FINDINGS ════════════════════════════════════════════════════ -->
 <section id="tab-findings" class="tab-panel section-pad" role="tabpanel" aria-labelledby="ntab-findings">
@@ -901,9 +862,8 @@ a:hover{text-decoration:underline}
     ${counts.high     > 0 ? `<button class="filter-btn f-high"     data-filter="high"     onclick="filterFindings(this,'high')">High (${counts.high})</button>` : ''}
     ${counts.medium   > 0 ? `<button class="filter-btn f-medium"   data-filter="medium"   onclick="filterFindings(this,'medium')">Medium (${counts.medium})</button>` : ''}
     ${counts.low      > 0 ? `<button class="filter-btn f-low"      data-filter="low"      onclick="filterFindings(this,'low')">Low (${counts.low})</button>` : ''}
-    <button class="filter-btn" data-filter="zap"     onclick="filterFindings(this,'zap')">ZAP only</button>
-    <button class="filter-btn" data-filter="custom"  onclick="filterFindings(this,'custom')">Custom only</button>
-    <button class="filter-btn" data-filter="pentest" onclick="filterFindings(this,'pentest')">Pentest only</button>
+    <button class="filter-btn" data-filter="zap"    onclick="filterFindings(this,'zap')">ZAP only</button>
+    <button class="filter-btn" data-filter="custom" onclick="filterFindings(this,'custom')">Custom only</button>
   </div>
   <div id="findings-list">
     ${findingCardsHtml || '<div class="no-data-msg">No findings recorded for this assessment.</div>'}
@@ -916,7 +876,13 @@ a:hover{text-decoration:underline}
   ${complianceHtml}
 </section>
 
-<!-- ══ TAB 7: SCAN DETAILS ════════════════════════════════════════════════════ -->
+<!-- ══ TAB 7: RECOMMENDATIONS ════════════════════════════════════════════════ -->
+<section id="tab-recs" class="tab-panel section-pad" role="tabpanel" aria-labelledby="ntab-recs">
+  <div class="section-hdr">Prioritised remediation roadmap — P0 → P3</div>
+  ${recommendationsHtml}
+</section>
+
+<!-- ══ TAB 8: SCAN DETAILS ════════════════════════════════════════════════════ -->
 <section id="tab-meta" class="tab-panel section-pad" role="tabpanel" aria-labelledby="ntab-meta">
   <div class="section-hdr">Assessment &amp; environment details</div>
   <div class="meta-2col">
@@ -941,15 +907,6 @@ a:hover{text-decoration:underline}
       ${metaRowHtml('Jira story',           m.jiraStoryUrl)}
       ${metaRowHtml('Zephyr cycle',         m.zephyrCycleUrl)}
     </div>
-    ${pentestModules.length ? `<div class="meta-section">
-      <div class="meta-section-title">Pentest Details</div>
-      ${metaRowHtml('Modules run',         pentestModules.length)}
-      ${metaRowHtml('Total PT findings',   totalPentestFindgs)}
-      ${pentestDurationSec ? metaRowHtml('Duration', pentestDurationSec + 's') : ''}
-      ${metaRowHtml('Attack vectors used', pentestTotalVectors || null)}
-      ${metaRowHtml('Successful exploits', m.pentestSuccessfulExploits || null)}
-      ${pentestSuccessRate !== null ? metaRowHtml('Exploit success rate', pentestSuccessRate + '%') : ''}
-    </div>` : ''}
   </div>
 </section>
 
@@ -971,11 +928,10 @@ a:hover{text-decoration:underline}
 <script>
 (function(){
 'use strict';
-var F     = ${FINDINGS_JSON};
-var CNT   = ${COUNTS_JSON};
-var LAY   = ${LAYERS_JSON};
-var HIST  = ${HISTORICAL_JSON};
-var PTCOV = ${PENTEST_COVERAGE_JSON};
+var F    = ${FINDINGS_JSON};
+var CNT  = ${COUNTS_JSON};
+var LAY  = ${LAYERS_JSON};
+var HIST = ${HISTORICAL_JSON};
 
 var SC   = { critical:'#b91c1c', high:'#c2410c', medium:'#d97706', low:'#1e40af', informational:'#5b21b6', info:'#5b21b6' };
 var GRID = 'rgba(100,116,139,0.08)';
@@ -1026,9 +982,8 @@ window.filterFindings = function(btn, filter) {
   var sevs   = ['critical','high','medium','low','informational'];
   var labels = ['Critical','High','Medium','Low','Info'];
   var layerDefs = [
-    { key:'zap',     label:'ZAP',     color:'#5b21b6' },
-    { key:'custom',  label:'Custom',  color:'#c2410c' },
-    { key:'pentest', label:'Pentest', color:'#be185d' },
+    { key:'zap',    label:'ZAP',    color:'#5b21b6' },
+    { key:'custom', label:'Custom', color:'#c2410c' },
   ];
   var datasets = layerDefs.map(function(l){
     return { label:l.label, data:sevs.map(function(s){ return(LAY[l.key]&&LAY[l.key][s])||0; }),
@@ -1113,27 +1068,6 @@ window.filterFindings = function(btn, filter) {
   });
 })();
 
-/* Pentest coverage */
-(function(){
-  var el = document.getElementById('chart-pentest-coverage'); if(!el) return;
-  if(!PTCOV||!PTCOV.some(function(p){ return p.endpoints>0; })){
-    el.parentElement.innerHTML='<div class="no-data-msg">No pentest coverage data available.</div>'; return;
-  }
-  new Chart(el, {
-    type:'bar',
-    data:{ labels:PTCOV.map(function(p){ return p.label; }),
-      datasets:[
-        { label:'Endpoints tested', data:PTCOV.map(function(p){ return p.endpoints; }), backgroundColor:'#5b21b6bb', borderRadius:3 },
-        { label:'Findings',         data:PTCOV.map(function(p){ return p.findings; }),  backgroundColor:'#b91c1cbb', borderRadius:3 }
-      ]},
-    options:mx(BASE,{ indexAxis:'y',
-      plugins:{ legend:{ display:true, position:'top',
-        labels:{ color:'#475569', font:{ family:"'Inter',sans-serif", size:10 }, padding:10 }}},
-      scales:{ x:{ grid:{ color:GRID }, ticks:{ font:TF }, beginAtZero:true },
-               y:{ grid:{ display:false }, ticks:{ font:{ family:"'Inter',sans-serif", size:10, color:'#475569' }}}}})
-  });
-})();
-
 })();
 </script>
 </body>
@@ -1200,29 +1134,12 @@ if (require.main === module) {
       jiraStoryUrl:'https://yourorg.atlassian.net/browse/SCRUM-6',
       zephyrCycleUrl:'https://yourorg.atlassian.net/jira/software/projects/SCRUM/boards',
       zapReportPath:'test-results/security/SCRUM-6-zap-report.json',
-      pentestTotalAttackVectors:3847, pentestSuccessfulExploits:89, pentestDurationMs:2538000,
       historicalScans:[
         { date:'2026-01-15', critical:4, high:8, medium:12, low:18, info:5 },
         { date:'2026-02-10', critical:3, high:7, medium:10, low:15, info:4 },
         { date:'2026-03-05', critical:3, high:6, medium:9,  low:14, info:6 },
         { date:'2026-04-01', critical:2, high:5, medium:8,  low:12, info:3 },
         { date:'2026-04-20', critical:2, high:5, medium:7,  low:10, info:3 },
-      ],
-      pentestModules:[
-        { name:'apiFuzzing',     status:'success', endpointsTested:47,
-          findings:[{ id:'PT-001', name:'SQL Injection in /api/v2/employee/search', severity:'critical', cvss:9.8 }],
-          attackVectorsApplied:['SQL Injection','NoSQL Injection','XPath Injection','OS Command Injection'], durationMs:402000 },
-        { name:'authBypass',     status:'success', endpointsTested:12, findings:[],
-          attackVectorsApplied:['JWT alg:none','Token forging','Forced browse'], durationMs:198000 },
-        { name:'idorDetection',  status:'partial',  endpointsTested:23, findings:[],
-          attackVectorsApplied:['Integer ID enumeration','UUID prediction'], durationMs:310000 },
-        { name:'rateLimiting',   status:'success', endpointsTested:8,  findings:[],
-          attackVectorsApplied:['Burst requests','IP rotation'], durationMs:187000 },
-        { name:'sessionMgmt',    status:'success', endpointsTested:15, findings:[],
-          attackVectorsApplied:['Session fixation','Cookie theft','Token reuse'], durationMs:290000 },
-        { name:'cryptoWeakness', status:'success', endpointsTested:6,  findings:[],
-          attackVectorsApplied:['Weak cipher detection','MD5/SHA1 check'], durationMs:89000 },
-        { name:'fileUpload',     status:'not-run', endpointsTested:0,  findings:[], attackVectorsApplied:[], durationMs:0 },
       ],
     };
     findings = [
@@ -1311,26 +1228,6 @@ if (require.main === module) {
         steps:['Update PHP: session.cookie_secure=1, session.cookie_httponly=1','Add SameSite=Strict to prevent CSRF exploitation.'],
         references:[{label:'CWE-614',url:'https://cwe.mitre.org/data/definitions/614.html'}],
         jiraBug:null, status:'new' },
-      { id:'PT-001', source:'pentest', name:'SQL Injection in /api/v2/employee/search', severity:'critical', cvss:9.8,
-        cvssVector:'AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H', cwe:'CWE-89', cweName:'SQL Injection',
-        owaspId:'A03:2021', owaspName:'Injection', pentestModule:'apiFuzzing',
-        description:'Raw string concatenation in the query builder allows full database extraction. No parameterised queries used.',
-        evidence:"GET /api/v2/employee/search?name=' OR 1=1--\nHTTP/1.1 200 OK\n[all 487 employee records returned including salary and PII]",
-        url:'/api/v2/employee/search',
-        steps:[
-          'Replace raw string concatenation with PreparedStatement or ORM query builder.',
-          'Add a WAF rule blocking SQL metacharacters as a defence-in-depth measure.',
-          'Add regression test: send \' OR 1=1-- as name parameter and assert HTTP 400 or empty result.',
-        ],
-        attackVector:{ technique:'SQL Injection', payload:"' OR 1=1--" },
-        remediation:{ priority:'P0',
-          shortTermFix:'Add input sanitisation and validation on the name query parameter.',
-          permanentFix:'Migrate all database queries to ORM parameterised queries.',
-          codeExample:{
-            vulnerable:"db.query(\"SELECT * FROM employee WHERE name='\" + name + \"'\")",
-            secure:"db.prepare('SELECT * FROM employee WHERE name = ?').execute(name)" }},
-        references:[{label:'OWASP A03:2021',url:'https://owasp.org/Top10/A03_2021-Injection/'},{label:'CWE-89',url:'https://cwe.mitre.org/data/definitions/89.html'}],
-        jiraBug:'SCRUM-210', status:'new' },
     ];
   }
 

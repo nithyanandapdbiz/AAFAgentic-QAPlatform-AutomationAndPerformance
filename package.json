@@ -71,7 +71,15 @@
     "preflight": "node scripts/pre-flight.js",
     "cleanup:dry-run": "node scripts/cleanup-artifacts.js --dry-run",
     "cleanup:artifacts": "node scripts/cleanup-artifacts.js",
-    "cleanup:artifacts:aggressive": "node scripts/cleanup-artifacts.js --aggressive"
+    "cleanup:artifacts:aggressive": "node scripts/cleanup-artifacts.js --aggressive",
+    "pentest": "node scripts/run-pentest.js",
+    "pentest:headless": "node scripts/run-pentest.js --headless --no-pause",
+    "pentest:dry-run": "node scripts/run-pentest.js --dry-run",
+    "pentest:nuclei": "node scripts/run-pentest.js --test-tool=nuclei --skip-sync --skip-git",
+    "pentest:sqlmap": "node scripts/run-pentest.js --test-tool=sqlmap --skip-sync --skip-git",
+    "pentest:ffuf": "node scripts/run-pentest.js --test-tool=ffuf --skip-sync --skip-git",
+    "pentest:report": "node scripts/generate-pentest-report.js",
+    "pentest:ci": "node scripts/run-pentest.js --headless --no-pause --skip-git"
   },
   "dependencies": {
     "axios": "^1.6.0",

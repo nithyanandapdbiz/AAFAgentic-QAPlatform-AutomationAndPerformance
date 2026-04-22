@@ -816,6 +816,356 @@ async function runCustomChecks(checkNames, targetUrl, sessionCookies) {
   return results;
 }
 
+// ─── OWASP / CWE / Remediation enrichment data ───────────────────────────────
+
+const OWASP_NAMES = {
+  'A01:2021': 'Broken Access Control',
+  'A02:2021': 'Cryptographic Failures',
+  'A03:2021': 'Injection',
+  'A04:2021': 'Insecure Design',
+  'A05:2021': 'Security Misconfiguration',
+  'A06:2021': 'Vulnerable & Outdated Components',
+  'A07:2021': 'Identification & Authentication Failures',
+  'A08:2021': 'Software & Data Integrity Failures',
+  'A09:2021': 'Security Logging & Monitoring Failures',
+  'A10:2021': 'Server-Side Request Forgery',
+};
+
+// Per-check enrichment: CWE, CVSS vector, remediation steps, priority, references
+const CHECK_ENRICHMENT = {
+  'missing-security-headers': {
+    cwe: 'CWE-693', cweName: 'Protection Mechanism Failure',
+    cvssVector: 'AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N',
+    steps: [
+      'Add Content-Security-Policy header with a restrictive policy to all responses.',
+      'Set X-Content-Type-Options: nosniff on all responses to prevent MIME sniffing.',
+      'Set X-Frame-Options: DENY or use CSP frame-ancestors directive.',
+      'Enable Strict-Transport-Security (HSTS) with max-age=31536000; includeSubDomains.',
+      'Set Referrer-Policy: strict-origin-when-cross-origin.',
+      'Define Permissions-Policy to restrict unused browser features.',
+    ],
+    remediation: { priority: 'P1',
+      shortTermFix: 'Add the missing security headers via web server or reverse proxy configuration (nginx/Apache/IIS).',
+      permanentFix: 'Implement a global security-headers middleware in the application framework applied to every response.' },
+    references: [
+      { label: 'OWASP Secure Headers Project', url: 'https://owasp.org/www-project-secure-headers/' },
+      { label: 'CWE-693', url: 'https://cwe.mitre.org/data/definitions/693.html' },
+      { label: 'OWASP A05:2021', url: 'https://owasp.org/Top10/A05_2021-Security_Misconfiguration/' },
+    ],
+  },
+  'insecure-cookie-flags': {
+    cwe: 'CWE-614', cweName: 'Sensitive Cookie in HTTPS Session Without Secure Attribute',
+    cvssVector: 'AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:N/A:N',
+    steps: [
+      'Set the Secure flag on all authentication and session cookies.',
+      'Set the HttpOnly flag to prevent JavaScript access to session cookies.',
+      'Set SameSite=Strict or SameSite=Lax to mitigate CSRF via cookie leakage.',
+      'Audit cookie expiry values; ensure idle session timeout is enforced server-side.',
+    ],
+    remediation: { priority: 'P1',
+      shortTermFix: 'Add Secure, HttpOnly, and SameSite=Strict to all session cookie Set-Cookie directives.',
+      permanentFix: 'Centralise cookie creation in an authentication middleware that enforces all flags automatically.' },
+    references: [
+      { label: 'OWASP Session Management', url: 'https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html' },
+      { label: 'CWE-614', url: 'https://cwe.mitre.org/data/definitions/614.html' },
+    ],
+  },
+  'session-fixation': {
+    cwe: 'CWE-384', cweName: 'Session Fixation',
+    cvssVector: 'AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:N',
+    steps: [
+      'Regenerate the session ID immediately after successful authentication.',
+      'Invalidate any pre-authentication session tokens on login.',
+      'Use a cryptographically secure session ID generator (minimum 128-bit entropy).',
+      'Bind the session to IP and User-Agent as an additional heuristic check.',
+    ],
+    remediation: { priority: 'P0',
+      shortTermFix: 'Regenerate the session token on successful login in the authentication handler.',
+      permanentFix: 'Use a well-tested session management library that automatically regenerates IDs on privilege changes.' },
+    references: [
+      { label: 'OWASP A07:2021', url: 'https://owasp.org/Top10/A07_2021-Identification_and_Authentication_Failures/' },
+      { label: 'CWE-384', url: 'https://cwe.mitre.org/data/definitions/384.html' },
+    ],
+  },
+  'open-redirect': {
+    cwe: 'CWE-601', cweName: 'URL Redirection to Untrusted Site (Open Redirect)',
+    cvssVector: 'AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N',
+    steps: [
+      'Validate all redirect destinations against a strict allowlist of trusted domains.',
+      'Reject any redirect URL containing an external hostname or scheme other than https.',
+      'Use indirect redirects: map a token/ID to a server-side known-safe URL.',
+    ],
+    remediation: { priority: 'P1',
+      shortTermFix: 'Block all redirects to external origins at the application layer.',
+      permanentFix: 'Implement a redirect allowlist: only permit predefined internal paths or explicitly trusted domains.' },
+    references: [
+      { label: 'CWE-601', url: 'https://cwe.mitre.org/data/definitions/601.html' },
+      { label: 'OWASP Unvalidated Redirects', url: 'https://cheatsheetseries.owasp.org/cheatsheets/Unvalidated_Redirects_and_Forwards_Cheat_Sheet.html' },
+    ],
+  },
+  'sensitive-data-in-response': {
+    cwe: 'CWE-200', cweName: 'Exposure of Sensitive Information to an Unauthorized Actor',
+    cvssVector: 'AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N',
+    steps: [
+      'Define an explicit API response schema and strip all unlisted fields before serialisation.',
+      'Remove PII (salary, SSN, national ID, tokens) from API responses via a serialisation allowlist.',
+      'Implement RBAC: restrict sensitive fields to authorised roles only (e.g., HR_ADMIN).',
+      'Add field-level access control to the API/ORM layer.',
+      'Conduct a full audit of all API endpoints for accidental data exposure.',
+    ],
+    remediation: { priority: 'P0',
+      shortTermFix: 'Immediately strip sensitive fields from all API responses using a serialisation allowlist.',
+      permanentFix: 'Implement field-level RBAC in the API layer with automated schema validation on all endpoints.' },
+    references: [
+      { label: 'OWASP A02:2021', url: 'https://owasp.org/Top10/A02_2021-Cryptographic_Failures/' },
+      { label: 'CWE-200', url: 'https://cwe.mitre.org/data/definitions/200.html' },
+    ],
+  },
+  'csrf-token-absence': {
+    cwe: 'CWE-352', cweName: 'Cross-Site Request Forgery (CSRF)',
+    cvssVector: 'AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:N',
+    steps: [
+      'Implement the synchroniser token pattern: include a CSRF token in all state-changing forms.',
+      'Validate the CSRF token server-side on every POST/PUT/PATCH/DELETE request.',
+      'Set SameSite=Strict on all session cookies as a secondary CSRF defence.',
+      'Use the double-submit cookie pattern for stateless REST APIs.',
+    ],
+    remediation: { priority: 'P0',
+      shortTermFix: 'Add CSRF token validation to all state-changing endpoints immediately.',
+      permanentFix: 'Integrate a CSRF protection middleware into the framework layer and audit all form endpoints.' },
+    references: [
+      { label: 'OWASP CSRF Prevention', url: 'https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html' },
+      { label: 'CWE-352', url: 'https://cwe.mitre.org/data/definitions/352.html' },
+    ],
+  },
+  'idor-employee-id': {
+    cwe: 'CWE-639', cweName: 'Authorization Bypass Through User-Controlled Key',
+    cvssVector: 'AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N',
+    steps: [
+      'Validate object ownership on every request against the authenticated user\'s security context.',
+      'Replace sequential integer IDs with UUIDs or opaque tokens in all API URLs.',
+      'Implement resource-level access-control checks in the API/service layer.',
+      'Log all cross-user access attempts and alert on anomalies.',
+    ],
+    remediation: { priority: 'P0',
+      shortTermFix: 'Add ownership validation checks to all resource-fetching endpoints before the next deployment.',
+      permanentFix: 'Implement a reusable IDOR-guard middleware that verifies ownership on every resource type.' },
+    references: [
+      { label: 'OWASP A01:2021', url: 'https://owasp.org/Top10/A01_2021-Broken_Access_Control/' },
+      { label: 'CWE-639', url: 'https://cwe.mitre.org/data/definitions/639.html' },
+      { label: 'OWASP IDOR Prevention', url: 'https://cheatsheetseries.owasp.org/cheatsheets/Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.html' },
+    ],
+  },
+  'sql-injection-signal': {
+    cwe: 'CWE-89', cweName: 'Improper Neutralisation of Special Elements in an SQL Command',
+    cvssVector: 'AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H',
+    steps: [
+      'Use parameterised queries or prepared statements exclusively — never concatenate user input into SQL.',
+      'Deploy an ORM with parameter binding for all database operations.',
+      'Implement a Web Application Firewall (WAF) as an additional layer.',
+      'Conduct an emergency audit of all SQL queries in the codebase using a SAST tool.',
+    ],
+    remediation: { priority: 'P0',
+      shortTermFix: 'Replace all string-concatenated SQL queries with parameterised statements immediately.',
+      permanentFix: 'Mandate ORM-level parameterised queries and add SAST scanning to the CI/CD pipeline to block raw SQL.' },
+    references: [
+      { label: 'OWASP A03:2021', url: 'https://owasp.org/Top10/A03_2021-Injection/' },
+      { label: 'CWE-89', url: 'https://cwe.mitre.org/data/definitions/89.html' },
+      { label: 'OWASP SQL Injection Prevention', url: 'https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html' },
+    ],
+  },
+  'xss-reflection-signal': {
+    cwe: 'CWE-79', cweName: 'Improper Neutralisation of Input During Web Page Generation',
+    cvssVector: 'AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N',
+    steps: [
+      'HTML-encode all output that includes user-controlled data in HTML, attribute, and JS contexts.',
+      'Implement a Content-Security-Policy that blocks inline scripts.',
+      'Use a framework with built-in output encoding (React, Angular, Thymeleaf).',
+      'Validate and sanitise all user input at the server side using an allowlist approach.',
+    ],
+    remediation: { priority: 'P0',
+      shortTermFix: 'Encode all user-controlled output in the appropriate context (HTML, attribute, URL, JS).',
+      permanentFix: 'Adopt a secure-by-default templating engine and add DAST XSS scanning in the CI/CD pipeline.' },
+    references: [
+      { label: 'OWASP A03:2021', url: 'https://owasp.org/Top10/A03_2021-Injection/' },
+      { label: 'CWE-79', url: 'https://cwe.mitre.org/data/definitions/79.html' },
+      { label: 'OWASP XSS Prevention', url: 'https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html' },
+    ],
+  },
+  'broken-auth-brute-force': {
+    cwe: 'CWE-307', cweName: 'Improper Restriction of Excessive Authentication Attempts',
+    cvssVector: 'AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N',
+    steps: [
+      'Lock accounts for 15 minutes after 5 consecutive failed login attempts.',
+      'Apply rate limiting: max 10 login requests per minute per IP address.',
+      'Introduce a CAPTCHA challenge after 3 failed attempts.',
+      'Alert the security team when > 20 failures per minute originate from a single IP.',
+    ],
+    remediation: { priority: 'P0',
+      shortTermFix: 'Enable account lockout and IP-level rate limiting on the login endpoint immediately.',
+      permanentFix: 'Implement a centralised authentication throttling service with alerting, CAPTCHA, and geo-blocking.' },
+    references: [
+      { label: 'OWASP A07:2021', url: 'https://owasp.org/Top10/A07_2021-Identification_and_Authentication_Failures/' },
+      { label: 'CWE-307', url: 'https://cwe.mitre.org/data/definitions/307.html' },
+    ],
+  },
+  'http-methods-allowed': {
+    cwe: 'CWE-16', cweName: 'Configuration',
+    cvssVector: 'AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N',
+    steps: [
+      'Disable TRACE and TRACK HTTP methods in the web server configuration.',
+      'Restrict allowed methods per endpoint to GET, POST, PUT, DELETE as required.',
+      'Return 405 Method Not Allowed for all unsupported HTTP methods.',
+    ],
+    remediation: { priority: 'P2',
+      shortTermFix: 'Disable TRACE/TRACK and restrict methods in the server or API-gateway config.',
+      permanentFix: 'Implement a request-method allowlist at the API gateway or ingress layer.' },
+    references: [
+      { label: 'OWASP A05:2021', url: 'https://owasp.org/Top10/A05_2021-Security_Misconfiguration/' },
+      { label: 'CWE-16', url: 'https://cwe.mitre.org/data/definitions/16.html' },
+    ],
+  },
+  'server-version-disclosure': {
+    cwe: 'CWE-200', cweName: 'Exposure of Sensitive Information to an Unauthorized Actor',
+    cvssVector: 'AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N',
+    steps: [
+      'Configure the web server to suppress the Server and X-Powered-By response headers.',
+      'Remove framework and platform version strings from error pages and meta tags.',
+      'Set a generic or absent Server header value in the server configuration.',
+    ],
+    remediation: { priority: 'P2',
+      shortTermFix: 'Remove or suppress Server and X-Powered-By headers in the server configuration immediately.',
+      permanentFix: 'Implement a response sanitisation middleware that strips all version-revealing headers globally.' },
+    references: [
+      { label: 'OWASP A05:2021', url: 'https://owasp.org/Top10/A05_2021-Security_Misconfiguration/' },
+      { label: 'CWE-200', url: 'https://cwe.mitre.org/data/definitions/200.html' },
+    ],
+  },
+  'cors-misconfiguration': {
+    cwe: 'CWE-346', cweName: 'Origin Validation Error',
+    cvssVector: 'AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N',
+    steps: [
+      'Replace wildcard or reflected-origin CORS with an explicit trusted-domain allowlist.',
+      'Never programmatically mirror the request Origin header as Access-Control-Allow-Origin.',
+      'Remove Access-Control-Allow-Credentials: true unless strictly required.',
+      'Audit all API endpoints to verify CORS policy consistency.',
+    ],
+    remediation: { priority: 'P1',
+      shortTermFix: 'Replace wildcard CORS config with an explicit origin allowlist.',
+      permanentFix: 'Centralise CORS policy in the API gateway with domain allowlisting and credential controls.' },
+    references: [
+      { label: 'OWASP CORS', url: 'https://cheatsheetseries.owasp.org/cheatsheets/Cross-Origin_Resource_Sharing_Cheat_Sheet.html' },
+      { label: 'CWE-346', url: 'https://cwe.mitre.org/data/definitions/346.html' },
+    ],
+  },
+  'clickjacking-protection': {
+    cwe: 'CWE-1021', cweName: 'Improper Restriction of Rendered UI Layers or Frames',
+    cvssVector: 'AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:L/A:N',
+    steps: [
+      'Set X-Frame-Options: DENY on all page responses.',
+      'Add Content-Security-Policy: frame-ancestors \'none\' for stronger browser support.',
+      'Test by attempting to iframe the application from an external origin.',
+    ],
+    remediation: { priority: 'P2',
+      shortTermFix: 'Add X-Frame-Options: DENY header to all responses via server configuration.',
+      permanentFix: 'Add frame-ancestors \'none\' to the Content-Security-Policy header on all pages.' },
+    references: [
+      { label: 'CWE-1021', url: 'https://cwe.mitre.org/data/definitions/1021.html' },
+      { label: 'OWASP Clickjacking Defence', url: 'https://cheatsheetseries.owasp.org/cheatsheets/Clickjacking_Defense_Cheat_Sheet.html' },
+    ],
+  },
+  'directory-traversal-signal': {
+    cwe: 'CWE-22', cweName: 'Improper Limitation of a Pathname to a Restricted Directory',
+    cvssVector: 'AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H',
+    steps: [
+      'Canonicalise all file paths and verify they resolve within the allowed base directory.',
+      'Reject any path input containing ../ or ..%2f sequences before processing.',
+      'Run the file-serving process with the minimum filesystem permissions required (principle of least privilege).',
+      'Consider containerised filesystem isolation (chroot/Docker volumes).',
+    ],
+    remediation: { priority: 'P0',
+      shortTermFix: 'Add path canonicalisation and traversal-sequence detection to all file-access endpoints immediately.',
+      permanentFix: 'Use a sandboxed file service with filesystem isolation; enforce allowlisted paths only.' },
+    references: [
+      { label: 'OWASP A01:2021', url: 'https://owasp.org/Top10/A01_2021-Broken_Access_Control/' },
+      { label: 'CWE-22', url: 'https://cwe.mitre.org/data/definitions/22.html' },
+    ],
+  },
+  'user-enumeration': {
+    cwe: 'CWE-204', cweName: 'Observable Response Discrepancy',
+    cvssVector: 'AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N',
+    steps: [
+      'Return identical HTTP status codes, body content, and response times for valid and invalid usernames.',
+      'Use a generic error message ("Invalid credentials") that does not reveal whether a username exists.',
+      'Add CAPTCHA on login and password-reset endpoints.',
+      'Rate-limit all authentication endpoints.',
+    ],
+    remediation: { priority: 'P1',
+      shortTermFix: 'Normalise authentication error messages and response times to prevent username guessing.',
+      permanentFix: 'Centralise authentication error handling to guarantee uniform responses for all failure cases.' },
+    references: [
+      { label: 'OWASP A07:2021', url: 'https://owasp.org/Top10/A07_2021-Identification_and_Authentication_Failures/' },
+      { label: 'CWE-204', url: 'https://cwe.mitre.org/data/definitions/204.html' },
+    ],
+  },
+  'password-policy-enforcement': {
+    cwe: 'CWE-521', cweName: 'Weak Password Requirements',
+    cvssVector: 'AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N',
+    steps: [
+      'Enforce minimum password length of 12 characters.',
+      'Require complexity: upper/lowercase letters, digits, and special characters.',
+      'Check passwords against known-breached databases (Have I Been Pwned API).',
+      'Enforce password history (last 10 passwords) and a maximum age policy.',
+    ],
+    remediation: { priority: 'P1',
+      shortTermFix: 'Update the password validation logic to enforce minimum complexity requirements.',
+      permanentFix: 'Integrate the HIBP API for breach checking and align with NIST SP 800-63B guidelines.' },
+    references: [
+      { label: 'OWASP A07:2021', url: 'https://owasp.org/Top10/A07_2021-Identification_and_Authentication_Failures/' },
+      { label: 'CWE-521', url: 'https://cwe.mitre.org/data/definitions/521.html' },
+      { label: 'NIST SP 800-63B', url: 'https://pages.nist.gov/800-63-3/sp800-63b.html' },
+    ],
+  },
+  'information-disclosure-errors': {
+    cwe: 'CWE-209', cweName: 'Generation of Error Message Containing Sensitive Information',
+    cvssVector: 'AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N',
+    steps: [
+      'Configure all environments to display generic HTTP 500 error pages without stack traces.',
+      'Implement a global exception handler that logs stack trace details server-side only.',
+      'Remove all debug mode flags from production deployments.',
+      'Sanitise error messages to exclude file paths, framework names, and version strings.',
+    ],
+    remediation: { priority: 'P1',
+      shortTermFix: 'Disable debug mode and configure a generic error handler for all unhandled exceptions.',
+      permanentFix: 'Implement a centralised error-handling middleware that logs internally but returns only safe messages to clients.' },
+    references: [
+      { label: 'OWASP A05:2021', url: 'https://owasp.org/Top10/A05_2021-Security_Misconfiguration/' },
+      { label: 'CWE-209', url: 'https://cwe.mitre.org/data/definitions/209.html' },
+    ],
+  },
+};
+
+/** Apply OWASP name, CWE, CVSS vector, steps, remediation, and references to a finding. */
+function enrichFinding(f) {
+  // OWASP category name
+  if (!f.owaspName && f.owaspId) {
+    const key = f.owaspId.includes(':') ? f.owaspId : f.owaspId + ':2021';
+    f.owaspName = OWASP_NAMES[key] || f.owaspId;
+  }
+  const en = CHECK_ENRICHMENT[f.name] || {};
+  if (en.cwe         && !f.cwe)         f.cwe         = en.cwe;
+  if (en.cweName     && !f.cweName)     f.cweName     = en.cweName;
+  if (en.cvssVector  && !f.cvssVector)  f.cvssVector  = en.cvssVector;
+  if (en.steps       && !f.steps)       f.steps       = en.steps;
+  if (en.remediation && !f.remediation) f.remediation = en.remediation;
+  if (en.references  && !f.references)  f.references  = en.references;
+  // Source label for display
+  if (!f.source) f.source = 'custom';
+  // Status default
+  if (!f.status) f.status = 'new';
+  return f;
+}
+
 // ─── parseFindings ────────────────────────────────────────────────────────────
 
 const SEVERITY_ORDER = ['informational', 'low', 'medium', 'high', 'critical'];
@@ -850,18 +1200,28 @@ function parseFindings(zapJsonPath, customResults = []) {
         const sites  = Array.isArray(data.site) ? data.site : (data.site ? [data.site] : []);
         const alerts = data.alerts || sites.flatMap(s => Array.isArray(s.alerts) ? s.alerts : []);
         for (const alert of alerts) {
-          findings.push({
+          const f = {
             id:          `ZAP-${idCounter++}`,
             source:      'zap',
             name:        alert.name || alert.alert || 'Unknown',
             severity:    zapRiskToSeverity(alert.riskcode),
             cvss:        parseFloat(alert.riskdesc?.split(' ')[0] || '0') || 0,
             owaspId:     alert.owaspid || 'A05:2021',
-            description: alert.description || '',
-            evidence:    (alert.instances?.[0]?.evidence || alert.evidence || '').slice(0, 300),
+            owaspName:   OWASP_NAMES[alert.owaspid] || OWASP_NAMES['A05:2021'],
+            cwe:         alert.cweid   ? `CWE-${alert.cweid}`   : null,
+            cweName:     alert.wascid  ? `WASC-${alert.wascid}` : null,
+            description: alert.desc || alert.description || '',
+            evidence:    (alert.instances?.[0]?.evidence || alert.evidence || '').slice(0, 500),
             url:         alert.instances?.[0]?.uri || alert.url || '',
             solution:    alert.solution || '',
-          });
+            status:      'new',
+          };
+          // Map ZAP solution field to remediation short-term fix
+          if (f.solution && !f.remediation) {
+            f.remediation = { priority: 'P2', shortTermFix: f.solution.replace(/<[^>]+>/g, '').trim() };
+          }
+          enrichFinding(f);
+          findings.push(f);
         }
       } catch (e) {
         logger.warn(`[SecExecution] Could not parse ZAP report: ${e.message}`);
@@ -871,18 +1231,20 @@ function parseFindings(zapJsonPath, customResults = []) {
     // Add custom check findings (only failures)
     for (const r of customResults) {
       if (!r.passed) {
-        findings.push({
+        const f = {
           id:          `CUSTOM-${idCounter++}`,
           source:      'custom',
           name:        r.name,
           severity:    r.severity,
           cvss:        r.cvss || 0,
-          owaspId:     r.owaspId || 'unknown',
+          owaspId:     r.owaspId || 'A05:2021',
           description: r.description || '',
-          evidence:    (r.evidence || '').slice(0, 300),
+          evidence:    (r.evidence || '').slice(0, 500),
           url:         r.url || '',
-          solution:    `Review and remediate: ${r.name}`,
-        });
+          status:      'new',
+        };
+        enrichFinding(f);
+        findings.push(f);
       }
     }
 
@@ -1041,6 +1403,117 @@ async function runFullScan(opts = {}) {
   return { findings, verdict, summary };
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION C — PENTEST ZAP ENHANCEMENTS (additive — no existing functions modified)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Scanner IDs to enable in the custom pentest scan policy.
+ * These cover injection, XSS, XXE, SSRF, path traversal, deserialization, etc.
+ */
+const PENTEST_SCANNER_IDS = [
+  40018, 40019, 40020, 40021, 40022, 40023, 40024, 40025, 40026, 40027,
+  40028, 40029, 40031, 40032, 40034, 40035, 40036, 40038, 40039, 40040,
+  40041, 40042, 40043, 40044, 40045, 90019, 90020, 90021, 90022, 90023,
+  90024, 90025, 90026, 90027, 90028, 90030,
+];
+
+/**
+ * C1 — Create a custom ZAP scan policy with all PENTEST_SCANNER_IDS enabled
+ * at strength=HIGH, threshold=MEDIUM.
+ *
+ * @param {string} policyName - Name to give the new scan policy
+ * @returns {Promise<string>} - policyName on success
+ */
+async function configureZapScanPolicy(policyName) {
+  try {
+    // Add the policy
+    await httpPost(
+      zapUrl('/JSON/ascan/action/addScanPolicy/'),
+      '',
+      {}
+    ).catch(() => {}); // POST with query params — use GET-compatible helper below
+
+    await retry(() => httpGet(
+      zapUrl(`/JSON/ascan/action/addScanPolicy/?apikey=${encodeURIComponent(zapApiKey())}` +
+             `&scanPolicyName=${encodeURIComponent(policyName)}`)
+    ), 3, 1000);
+
+    // Enable each scanner at strength=HIGH, threshold=MEDIUM
+    for (const scannerId of PENTEST_SCANNER_IDS) {
+      try {
+        await httpGet(
+          zapUrl('/JSON/ascan/action/setScanner/') +
+          `?apikey=${encodeURIComponent(zapApiKey())}` +
+          `&id=${scannerId}&scanPolicyName=${encodeURIComponent(policyName)}` +
+          `&strength=HIGH&threshold=MEDIUM`
+        );
+      } catch (e) {
+        logger.debug(`[ZAP-Policy] Could not set scanner ${scannerId}: ${e.message}`);
+      }
+    }
+
+    logger.info(`[ZAP-Policy] Scan policy "${policyName}" created with ${PENTEST_SCANNER_IDS.length} scanners at HIGH/MEDIUM`);
+    return policyName;
+  } catch (err) {
+    throw new AppError(`configureZapScanPolicy failed: ${err.message}`);
+  }
+}
+
+/**
+ * C2 — Configure ZAP to accept self-signed TLS certificates.
+ * Controlled by ZAP_IGNORE_SSL_ERRORS=true in .env.
+ *
+ * @returns {Promise<void>}
+ */
+async function setZapHttpsEnabled() {
+  if (process.env.ZAP_IGNORE_SSL_ERRORS !== 'true') {
+    logger.info('[ZAP-SSL] ZAP_IGNORE_SSL_ERRORS is not true — skipping SSL relaxation');
+    return;
+  }
+  try {
+    await retry(() => httpGet(
+      zapUrl('/JSON/network/action/setRootCaCertEnabled/') +
+      `?apikey=${encodeURIComponent(zapApiKey())}&enabled=true`
+    ), 3, 1000);
+    logger.info('[ZAP-SSL] ZAP configured to accept self-signed certificates');
+  } catch (err) {
+    logger.warn(`[ZAP-SSL] Could not configure SSL acceptance: ${err.message}`);
+  }
+}
+
+/**
+ * C3 — Export the ZAP scan report in the requested format.
+ *
+ * @param {string} outputDir - Directory to write the report to
+ * @param {'json'|'html'|'xml'} format - Report format
+ * @returns {Promise<string>} - Absolute path to written file
+ */
+async function exportZapReport(outputDir, format = 'json') {
+  fs.mkdirSync(outputDir, { recursive: true });
+
+  const formatMap = {
+    json: '/OTHER/core/other/jsonreport/',
+    html: '/OTHER/core/other/htmlreport/',
+    xml:  '/OTHER/core/other/xmlreport/',
+  };
+  const endpoint = formatMap[format] || formatMap.json;
+  const ext      = format === 'html' ? 'html' : format === 'xml' ? 'xml' : 'json';
+  const outPath  = path.join(outputDir, `zap-report.${ext}`);
+
+  try {
+    const res = await retry(() => httpGet(
+      zapUrl(endpoint) + `?apikey=${encodeURIComponent(zapApiKey())}`
+    ), 3, 1500);
+
+    fs.writeFileSync(outPath, res.body, 'utf8');
+    logger.info(`[ZAP-Report] Exported ${format} report to ${outPath}`);
+    return outPath;
+  } catch (err) {
+    throw new AppError(`exportZapReport failed: ${err.message}`);
+  }
+}
+
 module.exports = {
   getAuthSession,
   startZap,
@@ -1051,4 +1524,9 @@ module.exports = {
   evaluateSeverity,
   syncToZephyrAndJira,
   runFullScan,
+  // Pentest ZAP enhancements (Section C)
+  configureZapScanPolicy,
+  setZapHttpsEnabled,
+  exportZapReport,
+  PENTEST_SCANNER_IDS,
 };

@@ -50,8 +50,8 @@ const THINK_TIME = {
   spike:       '/* no think time — spike must hit cold */',
   soak:        'sleep(1 + Math.random() * 3)',
   scalability: 'sleep(0.5 + Math.random() * 1)',
-  breakpoint:  'sleep(0.1)',  // pentest: minimal delay between adversarial probes (simulates an automated scanner)
-  pentest:     'sleep(0.1 + Math.random() * 0.2)',};
+  breakpoint:  'sleep(0.1)',
+};
 
 // ── Warm-up stage (added before main stages for load/stress/soak/scalability) ─
 const WARMUP_STAGE  = '{ duration: \'30s\', target: 1 }';
@@ -182,23 +182,6 @@ function buildScenariosBlock(testType, loadProfile) {
         ],
       };
 
-    case 'pentest':
-      // Low VU count (max 5) — adversarial probes are sequential by design.
-      // poc mode keeps the run short; full mode gives enough time for brute-force detection.
-      return {
-        executor: 'ramping-vus',
-        stages: poc ? [
-          `{ duration: '10s', target: 2 }`,
-          `{ duration: '30s', target: 5 }`,
-          `{ duration: '10s', target: 0 }`,
-        ] : [
-          `{ duration: '15s', target: 2 }`,
-          `{ duration: '60s', target: 5 }`,
-          `{ duration: '30s', target: 5 }`,
-          `{ duration: '15s', target: 0 }`,
-        ],
-      };
-
     default:
       return {
         executor: 'ramping-vus',
@@ -251,22 +234,6 @@ function thresholdsLiteral(testType, p95Val, p99Val, errVal, isBreakpoint) {
   thresholds: {
     // breakpoint — thresholds are informational only; abortOnFail triggers on error rate
     'http_req_failed': ['rate<${errVal}'],
-  },`;
-  }
-
-  // pentest — server must stay responsive (p95 enforced); error rate is intentionally high
-  // (auth rejections, 429 rate-limit responses, 400 bad-request are the EXPECTED outcome).
-  if (testType === 'pentest') {
-    return `
-  thresholds: {
-    // Response time SLA — server must stay responsive under adversarial probes
-    'http_req_duration':  ['p(95)<${p95Val}', 'p(99)<${p99Val}'],
-    // High error rate expected (auth rejections / 429s / 400s are correct behavior)
-    'http_req_failed':    ['rate<${errVal}'],
-    // Probe-specific counters (informational — no hard limit)
-    'brute_force_probes': ['count>=0'],
-    'rate_limit_hits':    ['count>=0'],
-    'malformed_reqs':     ['count>=0'],
   },`;
   }
 
@@ -360,9 +327,7 @@ function buildStep3(resourcePath, writeMethod, p95Val) {
  */
 function generateK6Script(testType, storyKey, loadProfile, thresholds, baseUrl, storyDescription = '') {
   try {
-    const outDir = testType === 'pentest'
-      ? path.join(ROOT, 'tests', 'security', 'pentest')
-      : path.join(ROOT, 'tests', 'perf', testType);
+    const outDir = path.join(ROOT, 'tests', 'perf', testType);
     fs.mkdirSync(outDir, { recursive: true });
 
     const fileName   = `${storyKey}_${testType}.k6.js`;
@@ -381,153 +346,6 @@ function generateK6Script(testType, storyKey, loadProfile, thresholds, baseUrl, 
     const thresholdsSrc = thresholdsLiteral(testType, p95Val, p99Val, errVal, isBreakpoint);
 
     const { resourcePath, writeMethod, canInfer } = inferJourney(storyKey, storyDescription);
-
-    // ── Pentest script — dedicated adversarial probe template ──────────────────
-    // Generated regardless of journey inference; the probes are security-focused,
-    // not data-journey-focused.  Adjust PROBE_TARGETS for the actual endpoints.
-    if (testType === 'pentest') {
-      const pentestScript = `// storyKey: ${storyKey}
-// testType: pentest
-// generated: ${generated}
-// purpose: Adversarial performance probes — auth brute-force detection, rate-limit
-//          response time, malformed-input handling, auth bypass attempts.
-// IMPORTANT: Only run against environments you own and have explicit permission to test.
-//            Do NOT run against production without written authorisation.
-
-import http    from 'k6/http';
-import { check, sleep } from 'k6';
-import { Counter, Rate, Trend } from 'k6/metrics';
-import { textSummary } from 'https://jslib.k6.io/k6-summary/0.0.2/index.js';
-
-// ── Probe-specific counters ───────────────────────────────────────────────────
-const bruteForceProbes = new Counter('brute_force_probes');
-const rateLimitHits    = new Counter('rate_limit_hits');
-const malformedReqs    = new Counter('malformed_reqs');
-const errorRate        = new Rate('error_rate');
-const probeDuration    = new Trend('probe_duration', true);
-
-export const options = {${scenariosSrc}${thresholdsSrc}
-  summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)'],
-};
-
-const BASE_URL = __ENV.BASE_URL || '${baseUrl}';
-
-// ── Probe targets — adjust to match the AUT's actual endpoints ────────────────
-const PROBE_TARGETS = {
-  login:       \`\${BASE_URL}/web/index.php/auth/login\`,
-  dashboard:   \`\${BASE_URL}/web/index.php/dashboard/index\`,
-  api:         \`\${BASE_URL}/api/v2/\`,
-};
-
-// ── Common bad-credential set (auth enumeration probe) ────────────────────────
-// Uses clearly invalid credentials that no real account would have.
-const BAD_CREDS = [
-  { username: 'invalid_user_probe@test.invalid',  password: 'WrongPass!1' },
-  { username: 'admin_probe@test.invalid',         password: 'BadPass#2'   },
-  { username: "' OR '1'='1",                      password: 'sqli_probe'  },
-];
-
-// ── Malformed payloads (input validation probe) ───────────────────────────────
-const MALFORMED = [
-  '<script>alert(1)</script>',                    // XSS attempt
-  "'; DROP TABLE users; --",                      // SQL injection attempt
-  'A'.repeat(10000),                              // oversized input
-  '{"__proto__":{"admin":true}}',                 // prototype pollution
-];
-
-export function setup() {
-  const probe = http.get(BASE_URL, { timeout: '10s' });
-  check(probe, { 'app reachable': (r) => r.status >= 200 && r.status < 500 });
-  return { baseUrl: BASE_URL };
-}
-
-export default function () {
-  const vu = __VU % 3;   // round-robin across probe types
-
-  if (vu === 0) {
-    // ── Probe 1: Auth brute-force detection ──────────────────────────────────
-    // Verifies the server consistently rejects bad credentials quickly.
-    // A 401/403 in < p95 threshold means brute-force detection is working.
-    const cred = BAD_CREDS[__ITER % BAD_CREDS.length];
-    const t0   = Date.now();
-    const res  = http.post(
-      PROBE_TARGETS.login,
-      JSON.stringify({ username: cred.username, password: cred.password }),
-      {
-        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-        tags:    { probe: 'brute_force' },
-      }
-    );
-    probeDuration.add(Date.now() - t0);
-    bruteForceProbes.add(1);
-    // 401/403/429 are all acceptable (rejection); 200 with invalid creds is a finding.
-    const rejected = check(res, {
-      'brute-force rejected (401/403/429)': (r) => [401, 403, 429].includes(r.status),
-    });
-    errorRate.add(!rejected);
-    if (res.status === 429) rateLimitHits.add(1);
-
-  } else if (vu === 1) {
-    // ── Probe 2: Rate-limit response performance ──────────────────────────────
-    // Rapid-fires GET requests to verify 429 responses arrive promptly (not slow).
-    for (let i = 0; i < 5; i++) {
-      const t0  = Date.now();
-      const res = http.get(PROBE_TARGETS.api, {
-        tags: { probe: 'rate_limit' },
-      });
-      probeDuration.add(Date.now() - t0);
-      if (res.status === 429) rateLimitHits.add(1);
-    }
-
-  } else {
-    // ── Probe 3: Malformed input handling ────────────────────────────────────
-    // Sends adversarial payloads; expects 400/422 (validated) not 500 (crash).
-    const payload = MALFORMED[__ITER % MALFORMED.length];
-    const t0      = Date.now();
-    const res     = http.post(
-      PROBE_TARGETS.login,
-      payload,
-      {
-        headers: { 'Content-Type': 'application/json' },
-        tags:    { probe: 'malformed' },
-      }
-    );
-    probeDuration.add(Date.now() - t0);
-    malformedReqs.add(1);
-    // 400/401/403/422 = properly rejected; 500 = unhandled crash (security finding).
-    const handled = check(res, {
-      'malformed input handled (not 500)': (r) => r.status !== 500,
-    });
-    errorRate.add(!handled);
-  }
-
-  sleep(0.1 + Math.random() * 0.2);
-}
-
-export function teardown() {}
-
-export function handleSummary(data) {
-  return {
-    'test-results/security/pentest/${scriptName}-summary.json':    JSON.stringify(data, null, 2),
-    'test-results/security/pentest/${scriptName}-timeseries.csv':  buildCsv(data),
-    stdout: textSummary(data, { indent: ' ' }),
-  };
-}
-
-function buildCsv(data) {
-  const m   = data.metrics || {};
-  const dur = m.probe_duration || {};
-  const v   = dur.values || dur || {};
-  return [
-    'metric,p50,p90,p95,p99,avg,min,max',
-    \`probe_duration,\${v['p(50)']||0},\${v['p(90)']||0},\${v['p(95)']||0},\${v['p(99)']||0},\${v.avg||0},\${v.min||0},\${v.max||0}\`,
-  ].join('\\n');
-}
-`;
-      fs.writeFileSync(scriptPath, pentestScript, 'utf8');
-      logger.info(`[PerfScriptGenerator] Pentest script written: ${scriptPath}`);
-      return scriptPath;
-    }
 
     if (!canInfer) {
       console.warn(
