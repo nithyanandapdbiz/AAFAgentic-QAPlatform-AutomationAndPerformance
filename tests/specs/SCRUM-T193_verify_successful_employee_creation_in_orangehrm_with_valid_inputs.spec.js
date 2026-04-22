@@ -1,5 +1,5 @@
 // =============================================================================
-// Zephyr Test Case : SCRUM-T177
+// Zephyr Test Case : SCRUM-T193
 // Title            : Verify successful Employee Creation in OrangeHRM with valid inputs
 // Priority         : Normal
 // Labels           : happy-path, smoke, ep-valid, scrum-5
@@ -25,7 +25,7 @@
 const { test, expect }                = require('../fixtures/base.fixture');
 const { CREDENTIALS, TEST_EMPLOYEE } = require('../data/testData');
 
-test.describe('SCRUM-T177 | Verify successful Employee Creation in OrangeHRM with valid inputs', () => {
+test.describe('SCRUM-T193 | Verify successful Employee Creation in OrangeHRM with valid inputs', () => {
 
   test('Verify successful Employee Creation in OrangeHRM with valid inputs', async ({ page, loginPage, addEmployeePage, employeeListPage, sh, uniqueSuffix }, testInfo) => {
 

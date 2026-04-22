@@ -14,12 +14,15 @@ const perfConfig = {
 
   // Per-test-type SLA thresholds (ms / fraction)
   thresholds: {
-    load:        { p95: parseInt(process.env.PERF_LOAD_P95   || '2000', 10), p99: parseInt(process.env.PERF_LOAD_P99   || '4000', 10), errorRate: parseFloat(process.env.PERF_LOAD_ERROR   || '0.01') },
-    stress:      { p95: parseInt(process.env.PERF_STRESS_P95 || '3500', 10), p99: parseInt(process.env.PERF_STRESS_P99 || '6000', 10), errorRate: parseFloat(process.env.PERF_STRESS_ERROR || '0.02') },
-    spike:       { p95: parseInt(process.env.PERF_SPIKE_P95  || '5000', 10), p99: parseInt(process.env.PERF_SPIKE_P99  || '9000', 10), errorRate: parseFloat(process.env.PERF_SPIKE_ERROR  || '0.05') },
-    soak:        { p95: parseInt(process.env.PERF_SOAK_P95   || '2200', 10), p99: parseInt(process.env.PERF_SOAK_P99   || '4500', 10), errorRate: parseFloat(process.env.PERF_SOAK_ERROR   || '0.005') },
-    scalability: { p95: parseInt(process.env.PERF_SCALE_P95  || '3000', 10), p99: parseInt(process.env.PERF_SCALE_P99  || '5500', 10), errorRate: parseFloat(process.env.PERF_SCALE_ERROR  || '0.015') },
-    breakpoint:  { p95: parseInt(process.env.PERF_BREAK_P95  || '99999', 10), p99: parseInt(process.env.PERF_BREAK_P99 || '99999', 10), errorRate: parseFloat(process.env.PERF_BREAK_ERROR || '0.10') },
+    load:        { p95: parseInt(process.env.PERF_LOAD_P95    || '2000',  10), p99: parseInt(process.env.PERF_LOAD_P99    || '4000',  10), errorRate: parseFloat(process.env.PERF_LOAD_ERROR    || '0.01') },
+    stress:      { p95: parseInt(process.env.PERF_STRESS_P95  || '3500',  10), p99: parseInt(process.env.PERF_STRESS_P99  || '6000',  10), errorRate: parseFloat(process.env.PERF_STRESS_ERROR  || '0.02') },
+    spike:       { p95: parseInt(process.env.PERF_SPIKE_P95   || '5000',  10), p99: parseInt(process.env.PERF_SPIKE_P99   || '9000',  10), errorRate: parseFloat(process.env.PERF_SPIKE_ERROR   || '0.05') },
+    soak:        { p95: parseInt(process.env.PERF_SOAK_P95    || '2200',  10), p99: parseInt(process.env.PERF_SOAK_P99    || '4500',  10), errorRate: parseFloat(process.env.PERF_SOAK_ERROR    || '0.005') },
+    scalability: { p95: parseInt(process.env.PERF_SCALE_P95   || '3000',  10), p99: parseInt(process.env.PERF_SCALE_P99   || '5500',  10), errorRate: parseFloat(process.env.PERF_SCALE_ERROR   || '0.015') },
+    breakpoint:  { p95: parseInt(process.env.PERF_BREAK_P95   || '99999', 10), p99: parseInt(process.env.PERF_BREAK_P99   || '99999', 10), errorRate: parseFloat(process.env.PERF_BREAK_ERROR   || '0.10') },
+    // pentest — adversarial probes: expect high error rates (auth rejection, rate-limiting);
+    // measure that the server stays responsive under attack-pattern traffic.
+    pentest:     { p95: parseInt(process.env.PERF_PENTEST_P95 || '3000',  10), p99: parseInt(process.env.PERF_PENTEST_P99 || '6000',  10), errorRate: parseFloat(process.env.PERF_PENTEST_ERROR || '0.80') },
   },
 
   // Per-metric baseline regression tolerances

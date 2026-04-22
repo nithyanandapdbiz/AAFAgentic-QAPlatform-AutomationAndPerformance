@@ -58,6 +58,46 @@ const test = base.extend({
     await use(new ScreenshotHelper(page, testInfo));
   },
 
+  // ── Video capture for failed tests ───────────────────────────────────
+  // Overrides Playwright's built-in `page` fixture so we can close the
+  // page ourselves AFTER _afterEach has run, finalise the WebM recording,
+  // and attach the buffer to testInfo.  This makes the video available:
+  //   • in test-results.json (body field) → picked up by generate-report.js
+  //   • in allure-results/   (file copy)  → shown in Allure report
+  // The override is transparent: callers receive the same `page` object.
+  page: async ({ page }, use, testInfo) => {
+    // Grab the video recording object BEFORE the test runs so we can
+    // query it even if the page is replaced during the test.
+    const videoObj = page.video ? page.video() : null;
+
+    await use(page); // ← test body + auto-fixture teardowns run here
+
+    // Only embed video for non-passing tests (kept small and relevant).
+    if (testInfo.status !== 'passed' && testInfo.status !== 'skipped' && videoObj) {
+      try {
+        // Close the page first — Playwright finalises the WebM file on close.
+        // Calling close() on an already-closed page is a safe no-op.
+        if (!page.isClosed()) {
+          await page.close();
+        }
+        const videoPath = await videoObj.path();
+        if (videoPath && fs.existsSync(videoPath)) {
+          const buf = fs.readFileSync(videoPath);
+          // Attach with body (base64) so it is embedded in test-results.json
+          // and automatically copied to allure-results/ by allure-playwright.
+          await testInfo.attach('video', {
+            body:        buf,
+            contentType: 'video/webm',
+          });
+          console.log(`  [Hook] 🎬 Video attached (${(buf.length / 1024).toFixed(0)} KB) for "${testInfo.title}"`);
+        }
+      } catch (err) {
+        // Non-fatal — video capture failure must never break CI.
+        console.warn(`  [Hook] ⚠ Video capture failed for "${testInfo.title}": ${err.message}`);
+      }
+    }
+  },
+
   // ── Console error collector ───────────────────────────────────────────
   _consoleErrors: async ({ page }, use, testInfo) => {
     const errors = [];

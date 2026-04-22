@@ -1,5 +1,5 @@
 // =============================================================================
-// Zephyr Test Case : SCRUM-T174
+// Zephyr Test Case : SCRUM-T190
 // Title            : Verify concurrent access handling for Employee Creation in OrangeHRM
 // Priority         : Normal
 // Labels           : edge-case, error-guessing, dynamic-generated, concurrency, scrum-5
@@ -22,7 +22,7 @@
 const { test, expect }                = require('../fixtures/base.fixture');
 const { CREDENTIALS, TEST_EMPLOYEE } = require('../data/testData');
 
-test.describe('SCRUM-T174 | Verify concurrent access handling for Employee Creation in OrangeHRM', () => {
+test.describe('SCRUM-T190 | Verify concurrent access handling for Employee Creation in OrangeHRM', () => {
 
   test('Verify concurrent access handling for Employee Creation in OrangeHRM', async ({ page, loginPage, addEmployeePage, employeeListPage, sh, uniqueSuffix }, testInfo) => {
 

@@ -11,7 +11,7 @@
  *  - Step-by-step table with duration + pass/fail badge per step
  *  - Failure step highlighted in red with inline error message
  *  - End-of-test screenshot embedded as base64 (captured for every test)
- *  - Video recording embedded as <video> element (WebM, captured for every test)
+ *  - Video recording embedded as <video> element (WebM, failed tests only, body-based base64)
  *  - Step screenshots from ScreenshotHelper also shown
  *  - Allure report link in header (when allure-report/ exists)
  *
@@ -54,6 +54,7 @@ function collectTests(suites, parentFile = '') {
       let steps    = [];
       let failureScreenshot = null;
       let videoPath         = null;
+      let stepScreenshots   = [];   // populated from JSON body attachments below
 
       if (Array.isArray(spec.tests) && spec.tests.length) {
         const lastTest = spec.tests[spec.tests.length - 1];
@@ -104,23 +105,67 @@ function collectTests(suites, parentFile = '') {
             child:    !!s._child
           }));
 
-          // Extract Playwright-generated attachments (failure screenshot + video)
+          // Extract Playwright-generated attachments
+          // Step screenshots are stored as body (base64) — NOT as file paths.
+          // The Playwright auto-screenshot and video use file paths (may be
+          // missing after test-results is cleaned); the afterEach fixture
+          // also attaches a 'failure-screenshot' body as a reliable fallback.
+          let failureScreenshotDataUrl = null;
+          let failureScreenshotPath    = null;
+
           for (const att of (lastResult.attachments || [])) {
-            const attPath = att.path ? att.path.replace(/\\/g, '/') : null;
-            if (att.contentType === 'image/png' && att.name === 'screenshot') {
-              failureScreenshot = attPath;
+            const attPath = att.path || null;
+            const attBody = att.body || null;  // base64 string from JSON
+
+            if (att.contentType === 'image/png') {
+              if (att.name === 'screenshot') {
+                // Playwright auto-screenshot — file may not exist if cleaned
+                failureScreenshotPath = attPath;
+              } else if (att.name === 'failure-screenshot') {
+                // Body-based screenshot from afterEach hook — always in JSON
+                if (attBody && !failureScreenshotDataUrl) {
+                  failureScreenshotDataUrl = 'data:image/png;base64,' + attBody;
+                }
+              } else if (attBody) {
+                // Step screenshot from ScreenshotHelper — body-only, named
+                // "01. <label>", "02. <label>", etc.
+                stepScreenshots.push({
+                  label:   att.name || 'screenshot',
+                  dataUrl: 'data:image/png;base64,' + attBody,
+                });
+              }
             }
+
             if (att.contentType === 'video/webm' && att.name === 'video') {
-              videoPath = attPath;
+              // Body-based (embedded by base.fixture.js page override) takes
+              // priority; path-based is the old fallback kept for compatibility.
+              if (att.body) {
+                videoPath = 'data:video/webm;base64,' + att.body;
+              } else if (att.path) {
+                videoPath = att.path;
+              }
             }
+          }
+
+          // Resolve final failure screenshot:
+          //   1. prefer body from 'failure-screenshot' (always in JSON)
+          //   2. fall back to Playwright path-based auto-screenshot (file must exist)
+          if (failureScreenshotDataUrl) {
+            failureScreenshot = failureScreenshotDataUrl;
+          } else if (failureScreenshotPath) {
+            const b64 = toBase64Png(failureScreenshotPath);
+            if (b64) failureScreenshot = b64;
           }
         }
       } else if (typeof spec.ok === 'boolean') {
         status = spec.ok ? 'Pass' : 'Fail';
       }
 
-      // Load step screenshots from disk (written by ScreenshotHelper)
-      const screenshots = loadScreenshots(spec.title);
+      // Step screenshots already collected from JSON body attachments above.
+      // Fall back to disk if the JSON had no body attachments (e.g. older runs).
+      const screenshots = stepScreenshots.length
+        ? stepScreenshots
+        : loadScreenshots(spec.title);
 
       out.push({
         zephyrKey, title: spec.title, status, duration, errorMsg,
@@ -252,51 +297,70 @@ function buildHtml(tests, runDate, totalDuration) {
       </div>`;
     }
 
-    // ── End-of-test screenshot (Playwright-generated, always captured) ────────
+    // ── End-of-test / failure screenshot ─────────────────────────────────────────────────
+    // t.failureScreenshot is already a data URL (resolved during collection)
     let failureScreenshotHtml = '';
     if (t.failureScreenshot) {
-      const b64 = toBase64Png(t.failureScreenshot);
-      if (b64) {
-        const isPass = t.status === 'Pass';
-        const caption = isPass ? 'Final state at test end' : 'Captured at point of failure';
-        const figClass = isPass ? 'screenshot-figure end-shot' : 'screenshot-figure failure-shot';
-        failureScreenshotHtml = `
+      const isPass  = t.status === 'Pass';
+      const caption = isPass ? 'Final state at test end' : 'Captured at point of failure';
+      const figClass = isPass ? 'screenshot-figure end-shot' : 'screenshot-figure failure-shot';
+      failureScreenshotHtml = `
       <div class="failure-media">
         <h4>Screenshot</h4>
         <figure class="${figClass}">
-          <img src="${b64}" alt="End-of-test screenshot" loading="lazy" onclick="openLightbox(this)">
+          <img src="${t.failureScreenshot}" alt="End-of-test screenshot" loading="lazy" onclick="openLightbox(this)">
           <figcaption>${caption}</figcaption>
         </figure>
       </div>`;
-      }
     }
 
-    // ── Video recording (always captured) ────────────────────────────────
+    // ── Video recording (failed/blocked tests only) ──────────────────────────────────────────
     let videoHtml = '';
-    if (t.videoPath) {
-      const b64 = toBase64Webm(t.videoPath);
-      if (b64) {
+    if (t.videoPath && t.status !== 'Pass') {
+      // videoPath is already a data URL when the body was embedded by base.fixture.js;
+      // for legacy runs where only the file path was recorded, fall back to reading disk.
+      let videoSrc = '';
+      if (t.videoPath.startsWith('data:')) {
+        videoSrc = t.videoPath;                  // body-based — always available
+      } else {
+        const b64 = toBase64Webm(t.videoPath);   // path-based — file must still exist
+        if (b64) videoSrc = b64;
+      }
+
+      if (videoSrc) {
         videoHtml = `
       <div class="failure-media">
         <h4>Video Recording</h4>
         <video class="test-video" controls preload="metadata">
-          <source src="${b64}" type="video/webm">
+          <source src="${videoSrc}" type="video/webm">
           Your browser does not support WebM video.
         </video>
+      </div>`;
+      } else {
+        // File was cleaned from disk after test run — show informational notice
+        const shortName = t.videoPath.split(/[\\/]/).pop();
+        videoHtml = `
+      <div class="failure-media">
+        <h4>Video Recording</h4>
+        <div class="video-missing">
+          ⚠️ Video file not available — re-run tests to regenerate.
+          <code>${escHtml(shortName)}</code>
+        </div>
       </div>`;
       }
     }
 
-    // ── Step screenshots (ScreenshotHelper) ─────────────────────────────────
+    // ── Step screenshots (from ScreenshotHelper, body-based in JSON) ───────────
     const screenshotHtml = t.screenshots.length
       ? `<div class="steps-section">
           <h4>Step Screenshots (${t.screenshots.length})</h4>
           <div class="screenshots">
           ${t.screenshots.map(s => {
-            const b64 = toBase64(s.path);
-            return b64
+            // dataUrl is pre-populated from JSON body; path is disk fallback
+            const imgSrc = s.dataUrl || toBase64(s.path);
+            return imgSrc
               ? `<figure class="screenshot-figure">
-                  <img src="${b64}" alt="${escHtml(s.label)}" loading="lazy" onclick="openLightbox(this)">
+                  <img src="${imgSrc}" alt="${escHtml(s.label)}" loading="lazy" onclick="openLightbox(this)">
                   <figcaption>${escHtml(s.label)}</figcaption>
                 </figure>`
               : '';
@@ -400,6 +464,11 @@ function buildHtml(tests, runDate, totalDuration) {
   .end-shot img     { max-height: 400px; width: auto; border: 2px solid #4caf50; border-radius: 4px; }
   .test-video { width: 100%; max-width: 720px; border-radius: 6px;
                 border: 1px solid #e0e0e0; background: #000; display: block; }
+  .video-missing { display: inline-flex; align-items: center; gap: 10px;
+                   background: #fff8e1; border: 1px solid #ffe082; border-radius: 6px;
+                   padding: 10px 16px; font-size: .82rem; color: #795548; }
+  .video-missing code { background: #f5f5f5; padding: 2px 6px; border-radius: 3px;
+                        font-size: .78rem; color: #455a64; }
 
   /* ── Summary bar ────────────────────────────────────────────────────────── */
   .summary-bar {
@@ -743,9 +812,9 @@ function main() {
   // Count screenshots, steps, videos found
   const totalShots  = tests.reduce((acc, t) => acc + t.screenshots.length, 0);
   const totalSteps  = tests.reduce((acc, t) => acc + t.steps.length, 0);
-  const totalVideos = tests.filter(t => t.videoPath).length;
+  const totalVideos = tests.filter(t => t.videoPath && t.status !== 'Pass').length;
   const totalFShots = tests.filter(t => t.failureScreenshot).length;
-  console.log(`  Steps collected: ${totalSteps}  |  Failure screenshots: ${totalFShots}  |  Videos: ${totalVideos}`);
+  console.log(`  Steps collected: ${totalSteps}  |  Failure screenshots: ${totalFShots}  |  Videos (failed): ${totalVideos}`);
   console.log(`  Step screenshots embedded: ${totalShots}`);
 
   fs.mkdirSync(OUT_DIR, { recursive: true });

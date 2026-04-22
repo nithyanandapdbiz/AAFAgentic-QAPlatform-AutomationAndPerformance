@@ -143,7 +143,10 @@ async function main() {
         zapBootPromise = waitForZap();            // polling runs concurrently with Stage 1
         console.log(`${C.dim}  ↗ ZAP daemon starting in background (will be ready by Stage 2)...${C.reset}`);
       } else {
-        zapBootPromise = Promise.resolve(false);  // no ZAP_PATH — will skip
+        // ZAP_PATH not set or binary not found — leave zapBootPromise = null so Stage 2
+        // falls into the "skip" branch instead of the misleading "did not start in time" branch.
+        zapBootPromise = null;
+        console.log(`${C.dim}  ↷ ZAP_PATH not configured — ZAP scan will be skipped${C.reset}`);
       }
     }
   }
@@ -198,9 +201,14 @@ async function main() {
       stageLog(2, 'Start OWASP ZAP', `WARN (${elapsed(s2)}s)`);
     }
   } else {
-    // ZAP_AUTO_LAUNCH=false — skip silently
+    // zapBootPromise is null: either ZAP_AUTO_LAUNCH=false, or ZAP_PATH was not configured.
     stageLog(2, 'Start OWASP ZAP', 'SKIPPED');
-    console.log(`  ${C.dim}↷ ZAP auto-launch disabled — set ZAP_AUTO_LAUNCH=true in .env to enable${C.reset}`);
+    if (wantZap) {
+      // ZAP_AUTO_LAUNCH=true but ZAP_PATH not set / binary missing
+      console.log(`  ${C.yellow}↷ ZAP_PATH not configured — ZAP scan skipped. Set ZAP_PATH in .env to enable.${C.reset}`);
+    } else {
+      console.log(`  ${C.dim}↷ ZAP auto-launch disabled — set ZAP_AUTO_LAUNCH=true in .env to enable${C.reset}`);
+    }
   }
 
   // ── Stage 3 — Run scans ──────────────────────────────────────────────────

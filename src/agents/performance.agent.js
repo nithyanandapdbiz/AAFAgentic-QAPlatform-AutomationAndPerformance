@@ -7,7 +7,9 @@ const AppError = require('../core/errorHandler');
 // Keywords that trigger performance test generation (case-insensitive)
 const PERF_KEYWORDS = [
   'load', 'latency', 'throughput', 'concurrent', 'response time',
-  'sla', 'stress', 'spike', 'volume', 'scalability', 'performance'
+  'sla', 'stress', 'spike', 'volume', 'scalability', 'performance',
+  'pentest', 'penetration', 'brute force', 'rate limit', 'auth bypass',
+  'security performance', 'adversarial',
 ];
 
 /** Recursively extracts plain text from Atlassian Document Format or plain string */
@@ -82,6 +84,14 @@ function buildStages(type, loadProfile) {
       // Ramp from 1 → 2×VUs over 10 min; abortOnFail configured in script options
       return [
         { duration: '10m',         target: vus * 2 },
+      ];
+    case 'pentest':
+      // Adversarial short bursts — low VU count, sequential probes, no warm-up.
+      // Each VU fires one probe at a time (brute-force, malformed input, auth bypass).
+      return [
+        { duration: '10s',         target: 5          },
+        { duration: '30s',         target: 5          },
+        { duration: '10s',         target: 0          },
       ];
     default:
       return [
@@ -191,10 +201,18 @@ async function analyze(story, plan) {
         errorRate: Infinity,
         note:      'breakpoint test — thresholds disabled by design',
       },
+      // pentest: server must stay responsive (p95 < 3s) under adversarial traffic;
+      // high error rate (80%) is expected (auth rejections, 429s, 400s are correct behavior).
+      pentest: {
+        p95:       Math.round(p95 * 1.5),
+        p99:       Math.round(p99 * 1.5),
+        errorRate: 0.80,
+        note:      'pentest — high error rate expected (auth rejections / rate-limit responses)',
+      },
     };
 
     // ── 5. Test type mapper ─────────────────────────────────────────────────
-    const testTypes = ['load', 'stress', 'spike', 'soak', 'scalability', 'breakpoint'];
+    const testTypes = ['load', 'stress', 'spike', 'soak', 'scalability', 'breakpoint', 'pentest'];
 
     const scenarioConfigs = {};
     for (const type of testTypes) {
