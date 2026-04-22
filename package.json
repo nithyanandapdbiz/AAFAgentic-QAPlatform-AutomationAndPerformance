@@ -85,6 +85,7 @@
   "devDependencies": {
     "@playwright/test": "^1.40.0",
     "allure-commandline": "^2.38.1",
-    "allure-playwright": "3.6.0"
+    "allure-playwright": "3.6.0",
+    "chart.js": "^4.5.1"
   }
 }
