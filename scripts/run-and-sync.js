@@ -17,6 +17,10 @@ const { execSync }      = require('child_process');
 const fs                = require('fs');
 const path              = require('path');
 const axios             = require('axios');
+const { retry }         = require('../src/utils/retry');
+
+// Zephyr request timeout (ms) — prevents indefinite hangs when the API is unreachable.
+const ZEPHYR_TIMEOUT_MS = parseInt(process.env.ZEPHYR_TIMEOUT_MS || '15000', 10);
 
 // ─── Jira config (for traceability) ───────────────────────────────────────────
 const JIRA_URL     = (process.env.JIRA_URL || '').replace(/\/$/, '');
@@ -143,12 +147,21 @@ function rollupByKey(tests) {
 }
 
 // ─── Zephyr API calls ─────────────────────────────────────────────────────────
+/**
+ * Fetch all test cases for the project from Zephyr Scale.
+ * Uses a request timeout and up to 3 retries with 3-second back-off so that
+ * transient network blips (ETIMEDOUT / ECONNRESET) do not immediately crash
+ * the sync pipeline.
+ */
 async function fetchTestCases() {
-  const res = await axios.get(`${ZEPHYR_BASE}/testcases`, {
-    headers: zHeaders(),
-    params:  { projectKey: PROJECT_KEY, maxResults: 100 }
-  });
-  return res.data.values || res.data || [];
+  return retry(async () => {
+    const res = await axios.get(`${ZEPHYR_BASE}/testcases`, {
+      headers: zHeaders(),
+      params:  { projectKey: PROJECT_KEY, maxResults: 100 },
+      timeout: ZEPHYR_TIMEOUT_MS,
+    });
+    return res.data.values || res.data || [];
+  }, 3, 3000);
 }
 
 /**
@@ -362,8 +375,26 @@ async function main() {
   console.log('  Step 3 — Fetch Test Cases from Zephyr');
   console.log('──────────────────────────────────────────────────────\n');
 
-  const allZephyrTCs = await fetchTestCases();
-  console.log(`  Total test cases in Zephyr: ${allZephyrTCs.length}`);
+  let allZephyrTCs = [];
+  let zephyrFetchFailed = false;
+  try {
+    allZephyrTCs = await fetchTestCases();
+    console.log(`  Total test cases in Zephyr: ${allZephyrTCs.length}`);
+  } catch (fetchErr) {
+    // Network error (ETIMEDOUT, ECONNRESET, etc.) — degrade gracefully so the
+    // pipeline still produces a report; Zephyr sync steps will be skipped.
+    zephyrFetchFailed = true;
+    const code = fetchErr.code || (fetchErr.cause && fetchErr.cause.code) || 'UNKNOWN';
+    console.warn(`  ⚠ Could not reach Zephyr API (${code}) — Zephyr sync will be skipped.`);
+    console.warn(`    Check ZEPHYR_BASE_URL / ZEPHYR_ACCESS_KEY in .env, or set ZEPHYR_TIMEOUT_MS to increase the ${ZEPHYR_TIMEOUT_MS}ms timeout.`);
+  }
+
+  if (zephyrFetchFailed) {
+    // Skip Steps 4-5 (cycle creation + executions); jump straight to summary.
+    console.log('\n  Skipping Steps 4-5 (Zephyr sync) due to connectivity failure.\n');
+    process.exitCode = 1;
+    return;
+  }
 
   // Only sync TCs that have a matching Playwright result — skip stale/old TCs
   const zephyrTCs = allZephyrTCs.filter(tc => byKey.has(tc.key));
