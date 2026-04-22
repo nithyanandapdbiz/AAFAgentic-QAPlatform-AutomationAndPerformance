@@ -1,6 +1,6 @@
 // storyKey: SCRUM-5
 // testType: scalability
-// generated: 2026-04-22T02:52:08.897Z
+// generated: 2026-04-22T05:47:15.344Z
 // WARNING: Journey could not be inferred — manual customisation required.
 
 import http from 'k6/http';

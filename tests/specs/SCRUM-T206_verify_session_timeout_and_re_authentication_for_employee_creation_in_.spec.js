@@ -1,5 +1,5 @@
 // =============================================================================
-// Zephyr Test Case : SCRUM-T189
+// Zephyr Test Case : SCRUM-T206
 // Title            : Verify session timeout and re-authentication for Employee Creation in OrangeHRM
 // Priority         : Normal
 // Labels           : security, state-transition, session, dynamic-generated, scrum-5
@@ -21,7 +21,7 @@
 const { test, expect }                = require('../fixtures/base.fixture');
 const { CREDENTIALS, TEST_EMPLOYEE } = require('../data/testData');
 
-test.describe('SCRUM-T189 | Verify session timeout and re-authentication for Employee Creation in OrangeHRM', () => {
+test.describe('SCRUM-T206 | Verify session timeout and re-authentication for Employee Creation in OrangeHRM', () => {
 
   test('Verify session timeout and re-authentication for Employee Creation in OrangeHRM', async ({ page, loginPage, addEmployeePage, employeeListPage, sh, uniqueSuffix }, testInfo) => {
 

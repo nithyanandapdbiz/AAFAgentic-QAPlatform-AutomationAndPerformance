@@ -1,5 +1,5 @@
 // =============================================================================
-// Zephyr Test Case : SCRUM-T194
+// Zephyr Test Case : SCRUM-T211
 // Title            : Verify mandatory fields are enforced for Employee Creation in OrangeHRM
 // Priority         : Normal
 // Labels           : validation, negative, required-fields, ep-empty, scrum-5
@@ -25,7 +25,7 @@
 const { test, expect }                = require('../fixtures/base.fixture');
 const { CREDENTIALS, TEST_EMPLOYEE } = require('../data/testData');
 
-test.describe('SCRUM-T194 | Verify mandatory fields are enforced for Employee Creation in OrangeHRM', () => {
+test.describe('SCRUM-T211 | Verify mandatory fields are enforced for Employee Creation in OrangeHRM', () => {
 
   test('Verify mandatory fields are enforced for Employee Creation in OrangeHRM', async ({ page, loginPage, addEmployeePage, employeeListPage, sh, uniqueSuffix }, testInfo) => {
 
