@@ -151,6 +151,7 @@ const TYPE_COLOURS = {
   soak:        '#6a1b9a',
   scalability: '#00695c',
   breakpoint:  '#bf360c',
+  pentest:     '#c2185b',
 };
 
 function typePill(t) {
@@ -310,6 +311,14 @@ function generatePerfReport(results, thresholds, outputDir) {
     const p99Threshold  = th.p99;
     const errThreshold  = parseFloat((th.errorRate * 100).toFixed(3));
 
+    // ── Overview chart data (server-side) ────────────────────────────────────
+    const typePeakP95Arr = testTypes.map(t => {
+      const subset = rows.filter(r => r.testType === t);
+      return subset.length ? Math.round(Math.max(...subset.map(r => r.p95))) : 0;
+    });
+    const typePeakP95Data = JSON.stringify(typePeakP95Arr);
+    const typeColorData   = JSON.stringify(testTypes.map(t => TYPE_COLOURS[t] || '#888'));
+
     // â”€â”€ Sort rows: failâ†’warnâ†’pass â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const ORDER = { fail: 0, warn: 1, pass: 2 };
     const sortedRows = [...rows].sort((a, b) => ORDER[a.verdict] - ORDER[b.verdict]);
@@ -319,15 +328,22 @@ function generatePerfReport(results, thresholds, outputDir) {
       <tr class="hover-row">
         <td>${r.name}</td>
         <td>${typePill(r.testType)}</td>
-        <td>${fmt(r.p95)}</td>
-        <td>${fmt(r.p99)}</td>
+        <td class="${cellCls(r.p95, th.p95)}">${fmt(r.p95)}</td>
+        <td class="${cellCls(r.p99, th.p99)}">${fmt(r.p99)}</td>
         <td>${fmt(r.avg)}</td>
-        <td>${(r.errorRate * 100).toFixed(2)}%</td>
+        <td class="${cellCls(r.errorRate, th.errorRate)}">${(r.errorRate * 100).toFixed(2)}%</td>
         <td>${fmt(r.throughput, 1)}</td>
         <td>${fmt(r.vusMax)}</td>
         <td>${r.duration}</td>
         <td>${verdictBadge(r.verdict)}</td>
       </tr>`).join('');
+
+    // Cell colour helper: green < 80 % of SLA, amber 80-99 %, red >= 100 %
+    function cellCls(actual, limit) {
+      if (!limit) return '';
+      const pct = actual / limit;
+      return pct >= 1 ? 'cell-fail' : pct >= 0.8 ? 'cell-warn' : 'cell-ok';
+    }
 
     // â”€â”€ Tab 3: Script Details â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const RECS = {
@@ -537,6 +553,8 @@ function generatePerfReport(results, thresholds, outputDir) {
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
   <title>Performance Test Report â€” ${storyKey}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
   <style>
     /* ════════════════ DESIGN TOKENS ════════════════ */
@@ -625,8 +643,25 @@ function generatePerfReport(results, thresholds, outputDir) {
     .badge-fail{background:var(--fail-soft);color:var(--fail);border-color:var(--fail)}
     .pill{display:inline-flex;align-items:center;padding:2px 10px;border-radius:999px;font-size:.72em;font-weight:600;letter-spacing:.03em}
 
+    /* ════════════════ TABLE UTILITIES ════════════════ */
+    .cell-ok{color:var(--ok);font-weight:700}.cell-warn{color:var(--warn);font-weight:700}.cell-fail{color:var(--fail);font-weight:700}
+    .tbl-toolbar{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}
+    .tbl-search{flex:1;min-width:200px;max-width:400px;padding:8px 14px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface-alt);color:var(--ink);font-size:.85rem;font-family:inherit;outline:none;transition:border-color .15s,box-shadow .15s}
+    .tbl-search:focus{border-color:var(--brand);box-shadow:0 0 0 3px rgba(79,70,229,.12)}
+    .btn-sm{background:var(--surface-alt);color:var(--ink-soft);border:1px solid var(--border);border-radius:var(--radius-sm);padding:7px 14px;cursor:pointer;font-size:.8rem;font-weight:600;transition:all .15s;font-family:inherit;display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+    .btn-sm:hover{background:var(--brand-soft);color:var(--brand);border-color:var(--brand)}
+    th.sortable{cursor:pointer;user-select:none;position:relative;padding-right:24px}
+    th.sortable::after{content:"\\2195";position:absolute;right:8px;opacity:.35;font-size:.8em}
+    th.sort-asc::after{content:"\\2191";opacity:1;color:var(--brand)}
+    th.sort-desc::after{content:"\\2193";opacity:1;color:var(--brand)}
+
+    /* ════════════════ OVERVIEW RING ════════════════ */
+    .overview-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px;margin-bottom:24px}
+    .ov-card{background:var(--surface);border-radius:var(--radius);padding:20px 24px;box-shadow:var(--shadow-sm);border:1px solid var(--border-soft)}
+    .ov-card h3{margin:0 0 14px;font-size:.82rem;text-transform:uppercase;letter-spacing:.1em;color:var(--ink-soft);font-weight:700}
+
     /* ════════════════ TABS ════════════════ */
-    .tab-bar{display:flex;gap:4px;background:var(--surface);padding:6px;border-radius:var(--radius);box-shadow:var(--shadow-sm);border:1px solid var(--border-soft);margin-bottom:20px;overflow-x:auto;flex-wrap:wrap}
+    .tab-bar{display:flex;gap:4px;background:var(--surface);padding:6px;border-radius:var(--radius);box-shadow:var(--shadow-sm);border:1px solid var(--border-soft);margin-bottom:20px;overflow-x:auto;flex-wrap:wrap;position:sticky;top:0;z-index:100;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
     .tab-btn{padding:9px 16px;cursor:pointer;border:none;background:transparent;font-size:.82rem;color:var(--ink-soft);border-radius:8px;font-weight:600;transition:all .15s;white-space:nowrap;font-family:inherit}
     .tab-btn.active{background:var(--grad-hero);color:#fff;box-shadow:0 2px 6px rgba(79,70,229,.35)}
     .tab-btn:hover:not(.active){background:var(--surface-alt);color:var(--ink)}
@@ -814,14 +849,15 @@ function generatePerfReport(results, thresholds, outputDir) {
 
   <!-- ── TABS ─────────────────────────────────────────────────────────────── -->
   <div class="tab-bar">
+    <button class="tab-btn" onclick="showTab('t0',this)">&#128200; Overview</button>
     <button class="tab-btn active" onclick="showTab('t1',this)">Response Time</button>
     <button class="tab-btn"       onclick="showTab('t6',this)">Latency Distribution</button>
     <button class="tab-btn"       onclick="showTab('t7',this)">Throughput Timeline</button>
     <button class="tab-btn"       onclick="showTab('t8',this)">Network Breakdown</button>
-    <button class="tab-btn"       onclick="showTab('t2',this)">All Scripts Table</button>
+    <button class="tab-btn"       onclick="showTab('t2',this)">All Scripts ${failCount > 0 ? `<span style="background:var(--fail);color:#fff;border-radius:999px;font-size:.65em;padding:1px 6px;margin-left:4px">${failCount}</span>` : ''}</button>
     <button class="tab-btn"       onclick="showTab('t3',this)">Script Details</button>
     <button class="tab-btn"       onclick="showTab('t4',this)">Baseline Comparison</button>
-    <button class="tab-btn"       onclick="showTab('t5',this)">VU vs Latency Timeline</button>
+    <button class="tab-btn"       onclick="showTab('t5',this)">VU vs Latency</button>
   </div>
 
   <!-- TAB 1: RESPONSE TIME CHARTS -->
@@ -867,12 +903,26 @@ function generatePerfReport(results, thresholds, outputDir) {
 
   <!-- TAB 2: ALL SCRIPTS TABLE -->
   <div id="t2" class="tab-pane">
-    <table>
+    <div class="tbl-toolbar">
+      <input type="search" class="tbl-search" id="tblSearch" placeholder="&#128269;  Filter by script name or type…" oninput="filterTable(this.value)">
+      <div style="display:flex;gap:8px">
+        <button class="btn-sm" onclick="exportTableCSV()">&#8659; Export CSV</button>
+        <button class="btn-sm" onclick="clearFilter()">&#215; Clear</button>
+      </div>
+    </div>
+    <table id="scriptsTable">
       <thead>
         <tr>
-          <th>Script name</th><th>Type</th><th>p95 ms</th><th>p99 ms</th>
-          <th>Avg ms</th><th>Error %</th><th>Req/s</th><th>VUs</th>
-          <th>Duration</th><th>Verdict</th>
+          <th class="sortable" onclick="sortByCol(0)">Script name</th>
+          <th class="sortable" onclick="sortByCol(1)">Type</th>
+          <th class="sortable" onclick="sortByCol(2)">p95 ms</th>
+          <th class="sortable" onclick="sortByCol(3)">p99 ms</th>
+          <th class="sortable" onclick="sortByCol(4)">Avg ms</th>
+          <th class="sortable" onclick="sortByCol(5)">Error %</th>
+          <th class="sortable" onclick="sortByCol(6)">Req/s</th>
+          <th class="sortable" onclick="sortByCol(7)">VUs</th>
+          <th class="sortable" onclick="sortByCol(8)">Duration</th>
+          <th>Verdict</th>
         </tr>
       </thead>
       <tbody>
@@ -900,6 +950,66 @@ function generatePerfReport(results, thresholds, outputDir) {
   </div>
 
   <!-- â”€â”€ FOOTER â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+  <!-- TAB 5: VU vs LATENCY TIMELINE -->
+  <div id="t5" class="tab-pane">
+    <p style="color:var(--ink-soft);margin-top:0;font-size:.88rem">Dual-axis chart: left Y-axis = p95 latency (ms), right Y-axis = virtual users. Reads time-series CSV files from <code style="background:var(--surface-alt);padding:2px 6px;border-radius:4px">test-results/perf/</code>.</p>
+    <div id="t5-empty" style="display:none;background:var(--surface-alt);border:1px dashed var(--border);border-radius:var(--radius);padding:40px;text-align:center;color:var(--ink-muted)">
+      No timeseries CSV files found in <code>test-results/perf/</code>. Re-run tests to generate them.
+    </div>
+    <div class="chart-wrap"><canvas id="vuLatencyChart" height="90"></canvas></div>
+    <p style="font-size:.8rem;color:var(--ink-muted);margin-top:-8px">SLA p95 shown as a blue dashed annotation line.</p>
+  </div>
+
+  <!-- TAB 0: OVERVIEW SUMMARY -->
+  <div id="t0" class="tab-pane">
+    <div class="overview-grid">
+      <div class="ov-card">
+        <h3>Result Distribution</h3>
+        <div style="max-width:280px;margin:0 auto"><canvas id="overviewDonut" height="180"></canvas></div>
+        <div style="display:flex;gap:16px;justify-content:center;margin-top:14px;font-size:.82rem;flex-wrap:wrap">
+          <span><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#059669;margin-right:5px"></span>${passCount} Pass</span>
+          <span><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#d97706;margin-right:5px"></span>${warnCount} Warn</span>
+          <span><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#dc2626;margin-right:5px"></span>${failCount} Fail</span>
+        </div>
+      </div>
+      <div class="ov-card">
+        <h3>Peak p95 by Test Type</h3>
+        <canvas id="overviewTypeBar" height="180"></canvas>
+      </div>
+      <div class="ov-card">
+        <h3>Key Metrics at a Glance</h3>
+        <div style="display:grid;row-gap:10px;font-size:.85rem">
+          <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px dashed var(--border-soft)">
+            <span style="color:var(--ink-muted)">Total scripts run</span><strong>${rows.length}</strong>
+          </div>
+          <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px dashed var(--border-soft)">
+            <span style="color:var(--ink-muted)">Total HTTP requests</span><strong>${totalReqs.toLocaleString()}</strong>
+          </div>
+          <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px dashed var(--border-soft)">
+            <span style="color:var(--ink-muted)">Worst p95</span>
+            <strong class="${worstP95 > th.p95 ? 'c-fail' : worstP95 > th.p95 * 0.9 ? 'c-warn' : 'c-pass'}">${Math.round(worstP95)} ms</strong>
+          </div>
+          <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px dashed var(--border-soft)">
+            <span style="color:var(--ink-muted)">Worst p99</span>
+            <strong class="${worstP99 > th.p99 ? 'c-fail' : worstP99 > th.p99 * 0.9 ? 'c-warn' : 'c-pass'}">${Math.round(worstP99)} ms</strong>
+          </div>
+          <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px dashed var(--border-soft)">
+            <span style="color:var(--ink-muted)">Worst error rate</span>
+            <strong class="${worstErr > th.errorRate ? 'c-fail' : worstErr > th.errorRate * 0.9 ? 'c-warn' : 'c-pass'}">${(worstErr * 100).toFixed(2)}%</strong>
+          </div>
+          <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px dashed var(--border-soft)">
+            <span style="color:var(--ink-muted)">Peak VUs</span><strong>${maxVus}</strong>
+          </div>
+          <div style="display:flex;justify-content:space-between;padding:8px 0">
+            <span style="color:var(--ink-muted)">Baseline regression</span>
+            <strong class="${baseReg ? 'c-warn' : 'c-pass'}">${baseReg ? 'DETECTED' : 'None'}</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+    ${typeAgg.length > 0 ? '<h2>Per Test-Type Summary</h2><div class="type-agg">' + typeAggHtml + '</div>' : ''}
+  </div>
+
   <footer>
     ${jiraUrl && storyKey !== 'N/A' ? `<a href="${jiraUrl}/browse/${storyKey}" target="_blank">&#128279; Jira Story</a>` : ''}
     ${zephyrUrl ? `<a href="${zephyrUrl}" target="_blank">&#128279; Zephyr Cycle</a>` : ''}
@@ -963,6 +1073,12 @@ function generatePerfReport(results, thresholds, outputDir) {
     const P95_SLA    = ${p95Threshold};
     const P99_SLA    = ${p99Threshold};
     const ERR_SLA    = ${errThreshold};
+    const PASS_COUNT    = ${passCount};
+    const WARN_COUNT    = ${warnCount};
+    const FAIL_COUNT    = ${failCount};
+    const TEST_TYPES    = ${JSON.stringify(testTypes)};
+    const TYPE_PEAK_P95 = ${typePeakP95Data};
+    const TYPE_COLORS   = ${typeColorData};
 
     // Response Time Chart
     new Chart(document.getElementById('rtChart'), {
@@ -1124,7 +1240,112 @@ function generatePerfReport(results, thresholds, outputDir) {
     }
     drawSparklines();
 
-    // ── Tab 5: VU vs Latency Timeline ─────────────────────────────────────────────
+    // Overview Tab: Donut + Type Bar
+    (function drawOverview() {
+      var donutEl = document.getElementById('overviewDonut');
+      if (donutEl) {
+        new Chart(donutEl, {
+          type: 'doughnut',
+          data: {
+            labels: ['Pass', 'Warn', 'Fail'],
+            datasets: [{ data: [PASS_COUNT, WARN_COUNT, FAIL_COUNT],
+              backgroundColor: ['#059669','#d97706','#dc2626'],
+              borderWidth: 3, hoverOffset: 8 }]
+          },
+          options: { responsive: true, cutout: '68%',
+            plugins: { legend: { position: 'bottom' },
+              tooltip: { callbacks: { label: function(ctx) {
+                return ctx.label + ': ' + ctx.parsed + ' script' + (ctx.parsed !== 1 ? 's' : '');
+              }}}}}
+        });
+      }
+      var typeBarEl = document.getElementById('overviewTypeBar');
+      if (typeBarEl) {
+        new Chart(typeBarEl, {
+          type: 'bar',
+          data: { labels: TEST_TYPES,
+            datasets: [{ label: 'Peak p95 (ms)', data: TYPE_PEAK_P95,
+              backgroundColor: TYPE_COLORS, borderRadius: 6 }]
+          },
+          options: { indexAxis: 'y', responsive: true,
+            plugins: { legend: { display: false } },
+            scales: { x: { beginAtZero: true, title: { display: true, text: 'p95 (ms)' }}}},
+        });
+      }
+    })();
+
+    // Table search / filter
+    function filterTable(val) {
+      var rows = document.querySelectorAll('#scriptsTable tbody tr');
+      var q = val.toLowerCase();
+      rows.forEach(function(r) { r.style.display = r.textContent.toLowerCase().includes(q) ? '' : 'none'; });
+    }
+    function clearFilter() {
+      var el = document.getElementById('tblSearch');
+      if (el) { el.value = ''; filterTable(''); }
+    }
+
+    // Table sort
+    var _sortState = { col: -1, asc: true };
+    function sortByCol(colIdx) {
+      var table = document.getElementById('scriptsTable');
+      if (!table) return;
+      var tbody = table.querySelector('tbody');
+      var rows = Array.from(tbody.querySelectorAll('tr'));
+      var asc = _sortState.col === colIdx ? !_sortState.asc : true;
+      _sortState = { col: colIdx, asc: asc };
+      rows.sort(function(a, b) {
+        var av = a.cells[colIdx] ? a.cells[colIdx].textContent.trim() : '';
+        var bv = b.cells[colIdx] ? b.cells[colIdx].textContent.trim() : '';
+        var an = parseFloat(av.replace(/[^0-9.-]/g,'')); var bn = parseFloat(bv.replace(/[^0-9.-]/g,''));
+        if (!isNaN(an) && !isNaN(bn)) return asc ? an - bn : bn - an;
+        return asc ? av.localeCompare(bv) : bv.localeCompare(av);
+      });
+      rows.forEach(function(r) { tbody.appendChild(r); });
+      table.querySelectorAll('th').forEach(function(th, i) {
+        th.classList.toggle('sort-asc', i === colIdx && asc);
+        th.classList.toggle('sort-desc', i === colIdx && !asc);
+      });
+    }
+
+    // CSV Export
+    function exportTableCSV() {
+      var headers = ['Script','Type','p95 ms','p99 ms','Avg ms','Error %','Req/s','VUs','Duration','Verdict'];
+      var rows = Array.from(document.querySelectorAll('#scriptsTable tbody tr'))
+        .filter(function(r) { return r.style.display !== 'none'; })
+        .map(function(r) {
+          return Array.from(r.cells).map(function(c) {
+            return '"' + c.textContent.trim().replace(/"/g,'""') + '"';
+          }).join(',');
+        });
+      var csv = [headers.join(',')].concat(rows).join('\n');
+      var blob = new Blob([csv], { type: 'text/csv' });
+      var a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+      a.download = 'perf-results.csv'; a.click(); URL.revokeObjectURL(a.href);
+    }
+
+    // KPI counter animation
+    (function animateCounters() {
+      document.querySelectorAll('.kpi-val').forEach(function(el) {
+        var text = el.textContent.trim();
+        var m = text.match(/^([0-9,]+)(\D*.*)$/);
+        if (!m) return;
+        var target = parseInt(m[1].replace(/,/g,''), 10);
+        var suffix = m[2] || '';
+        if (isNaN(target) || target < 2) return;
+        var startTime = null; var duration = 900;
+        var animate = function(ts) {
+          if (!startTime) startTime = ts;
+          var p = Math.min((ts - startTime) / duration, 1);
+          var e = 1 - Math.pow(1 - p, 3);
+          el.textContent = Math.round(e * target).toLocaleString() + suffix;
+          if (p < 1) requestAnimationFrame(animate);
+        };
+        requestAnimationFrame(animate);
+      });
+    })();
+
+    // Tab 5: VU vs Latency Timeline ─────────────────────────────────────────────
     const TIMELINE_LABELS_EMBEDDED = ${JSON.stringify(timelineLabels)};
     const TIMELINE_P95_DS_EMBEDDED = ${JSON.stringify(timelineP95DS)};
     const TIMELINE_VU_DS_EMBEDDED  = ${JSON.stringify(timelineVuDS)};
