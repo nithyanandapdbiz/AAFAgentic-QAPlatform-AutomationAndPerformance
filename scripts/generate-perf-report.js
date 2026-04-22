@@ -1318,7 +1318,7 @@ function generatePerfReport(results, thresholds, outputDir) {
             return '"' + c.textContent.trim().replace(/"/g,'""') + '"';
           }).join(',');
         });
-      var csv = [headers.join(',')].concat(rows).join('\n');
+      var csv = [headers.join(',')].concat(rows).join('\\n');
       var blob = new Blob([csv], { type: 'text/csv' });
       var a = document.createElement('a'); a.href = URL.createObjectURL(blob);
       a.download = 'perf-results.csv'; a.click(); URL.revokeObjectURL(a.href);
