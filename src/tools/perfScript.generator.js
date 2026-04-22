@@ -360,7 +360,9 @@ function buildStep3(resourcePath, writeMethod, p95Val) {
  */
 function generateK6Script(testType, storyKey, loadProfile, thresholds, baseUrl, storyDescription = '') {
   try {
-    const outDir = path.join(ROOT, 'tests', 'perf', testType);
+    const outDir = testType === 'pentest'
+      ? path.join(ROOT, 'tests', 'security', 'pentest')
+      : path.join(ROOT, 'tests', 'perf', testType);
     fs.mkdirSync(outDir, { recursive: true });
 
     const fileName   = `${storyKey}_${testType}.k6.js`;
@@ -506,8 +508,8 @@ export function teardown() {}
 
 export function handleSummary(data) {
   return {
-    'test-results/perf/${scriptName}-summary.json':    JSON.stringify(data, null, 2),
-    'test-results/perf/${scriptName}-timeseries.csv':  buildCsv(data),
+    'test-results/security/pentest/${scriptName}-summary.json':    JSON.stringify(data, null, 2),
+    'test-results/security/pentest/${scriptName}-timeseries.csv':  buildCsv(data),
     stdout: textSummary(data, { indent: ' ' }),
   };
 }

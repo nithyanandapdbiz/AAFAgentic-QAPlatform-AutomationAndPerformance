@@ -65,7 +65,7 @@
     "perf:only:stress": "node scripts/run-perf-only.js --test-type=stress",
     "perf:only:spike": "node scripts/run-perf-only.js --test-type=spike",
     "perf:only:soak": "node scripts/run-perf-only.js --test-type=soak",
-    "perf:only:pentest": "node scripts/run-perf-only.js --test-type=pentest",
+    "security:only:pentest": "node scripts/run-security.js --pentest-only --skip-git",
     "security:only": "node scripts/run-security-only.js",
     "security:only:no-zap": "node scripts/run-security-only.js --no-zap",
     "preflight": "node scripts/pre-flight.js",

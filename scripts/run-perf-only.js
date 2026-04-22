@@ -17,7 +17,6 @@
  *   node scripts/run-perf-only.js --test-type=soak          ← soak only
  *   node scripts/run-perf-only.js --test-type=scalability   ← scalability only
  *   node scripts/run-perf-only.js --test-type=breakpoint    ← breakpoint only
- *   node scripts/run-perf-only.js --test-type=pentest       ← pentest only
  *   node scripts/run-perf-only.js --skip-generate           ← skip k6 script gen
  *   node scripts/run-perf-only.js --skip-sync               ← skip Zephyr sync
  *   node scripts/run-perf-only.js --skip-git                ← skip git push
@@ -30,7 +29,7 @@
  *   PERF_VUS_MAX     Maximum virtual users
  *
  * Supported test types:
- *   load | stress | spike | soak | scalability | breakpoint | pentest
+ *   load | stress | spike | soak | scalability | breakpoint
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -60,8 +59,7 @@ console.log(`\n${C.bold}${C.cyan}╔${B}╗${C.reset}`);
 console.log(row('Agentic QA Platform  —  Performance Tests Only'));
 console.log(row(''));
 console.log(row('Engine   : k6'));
-console.log(row(`Types    : load | stress | spike | soak | scalability`));
-console.log(row(`           breakpoint | pentest`));
+console.log(row(`Types    : load | stress | spike | soak | scalability | breakpoint`));
 console.log(row(''));
 console.log(row(`Running  : ${typeArg}`));
 console.log(row(`Issue    : ${process.env.ISSUE_KEY || '(set ISSUE_KEY in .env)'}`));

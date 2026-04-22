@@ -1,11 +1,11 @@
 'use strict';
-/** @module run-security — Seven-stage standalone security pipeline: generate config, start ZAP, run scans, evaluate findings, sync, report, git. */
+/** @module run-security — Eight-stage standalone security pipeline: generate config, start ZAP, run scans, run k6 adversarial pentest probes, evaluate findings, sync, report, git. */
 
 require('dotenv').config();
 const fs     = require('fs');
 const http   = require('http');
 const path   = require('path');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const logger = require('../src/utils/logger');
 const AppError = require('../src/core/errorHandler');
 
@@ -88,6 +88,7 @@ const flagSet = new Set(args.map(a => a.toLowerCase()));
 const flags = {
   skipGenerate: flagSet.has('--skip-generate'),
   noZap:        flagSet.has('--no-zap'),
+  pentestOnly:  flagSet.has('--pentest-only'),
   skipSync:     flagSet.has('--skip-sync'),
   skipBugs:     flagSet.has('--skip-bugs'),
   skipReport:   flagSet.has('--skip-report'),
@@ -118,7 +119,8 @@ async function main() {
   const targetUrl = process.env.BASE_URL  || 'https://opensource-demo.orangehrmlive.com';
 
   console.log(`\n${C.bold}${C.magenta}╔══════════════════════════════════════════════════════╗`);
-  console.log(`║  Agentic QA — Security Pipeline (7 stages)          ║`);
+  console.log(`║  Agentic QA — Security Pipeline (8 stages)          ║`);
+  console.log(`║  (ZAP passive/active + k6 adversarial pentest probes)  ║`);
   console.log(`╚══════════════════════════════════════════════════════╝${C.reset}\n`);
 
   const secService = require('../src/services/sec.execution.service');
@@ -127,6 +129,7 @@ async function main() {
   let verdict       = 'pass';
   let zapReportPath = null;
   let zapStarted    = false;
+  let customResults = [];
 
   // ── Pre-flight: start ZAP in background NOW so it warms up during Stage 1 ──
   let zapBootPromise = null;
@@ -152,9 +155,9 @@ async function main() {
   }
 
   // ── Stage 1 — Generate scan config ──────────────────────────────────────
-  stageLog(1, 'Generate security scan config', flags.skipGenerate ? 'SKIPPED' : 'RUNNING');
+  stageLog(1, 'Generate security scan config', (flags.skipGenerate || flags.pentestOnly) ? 'SKIPPED' : 'RUNNING');
   const s1 = Date.now();
-  if (!flags.skipGenerate) {
+  if (!flags.skipGenerate && !flags.pentestOnly) {
     try {
       await require('./generate-sec-scripts').run({ storyKey, baseUrl: targetUrl });
     } catch (err) {
@@ -165,9 +168,9 @@ async function main() {
 
   // ── Stage 2 — Start ZAP ──────────────────────────────────────────────────
   const s2 = Date.now();
-  if (flags.noZap) {
+  if (flags.noZap || flags.pentestOnly) {
     stageLog(2, 'Start OWASP ZAP', 'SKIPPED');
-    console.log(`  ${C.dim}↷ ZAP skipped (--no-zap)${C.reset}`);
+    console.log(`  ${C.dim}↷ ZAP skipped (${flags.pentestOnly ? '--pentest-only' : '--no-zap'})${C.reset}`);
   } else if (process.env.ZAP_DOCKER === 'true') {
     // Docker path — unchanged
     stageLog(2, 'Start OWASP ZAP', 'RUNNING');
@@ -212,7 +215,7 @@ async function main() {
   }
 
   // ── Stage 3 — Run scans ──────────────────────────────────────────────────
-  stageLog(3, 'Run ZAP + custom security scans', 'RUNNING');
+  stageLog(3, 'Run ZAP + custom security scans', flags.pentestOnly ? 'SKIPPED' : 'RUNNING');
   const s3 = Date.now();
 
   // All 18 custom check names — always run the full set regardless of config
@@ -248,6 +251,7 @@ async function main() {
   }
 
   // Establish authenticated session for checks that need it
+  if (!flags.pentestOnly) {
   console.log(`  ${C.dim}→ Establishing authenticated session...${C.reset}`);
   const sessionCookies = await secService.getAuthSession(targetUrl);
   if (sessionCookies) {
@@ -270,19 +274,128 @@ async function main() {
 
   // Custom checks (sequential) — always run all 18
   console.log(`  Running ${ALL_CHECKS.length} custom security checks...`);
-  const customResults = await secService.runCustomChecks(ALL_CHECKS, targetUrl, sessionCookies);
+  customResults = await secService.runCustomChecks(ALL_CHECKS, targetUrl, sessionCookies);
   const passedCount = customResults.filter(r => r.passed).length;
   const failedCount = customResults.filter(r => !r.passed).length;
   console.log(`  ${C.green}✓ Custom checks complete: ${passedCount} passed, ${failedCount} flagged${C.reset}`);
+  } // end !pentestOnly
 
   stageLog(3, 'Run ZAP + custom security scans', `DONE (${elapsed(s3)}s)`);
 
-  // ── Stage 4 — Evaluate findings ──────────────────────────────────────────
-  stageLog(4, 'Evaluate findings', 'RUNNING');
+  // ── Stage 4 — k6 Adversarial Pentest Probes ──────────────────────────────
+  // Penetration testing is a security discipline (OWASP A07:2021 Identification &
+  // Authentication Failures, A03:2021 Injection). k6 adversarial probes verify
+  // the server correctly rejects bad credentials, malformed inputs, and rate-limits.
+  stageLog(4, 'k6 Adversarial Pentest Probes', flags.pentestOnly ? 'RUNNING' : (flags.noZap && 'RUNNING' || 'RUNNING'));
+  const s4pentest = Date.now();
+  const pentestFindings = [];
+
+  if (!flags.skipGenerate) {
+    // Ensure output dir exists
+    fs.mkdirSync(path.join(ROOT, 'test-results', 'security', 'pentest'), { recursive: true });
+  }
+
+  const pentestDir = path.join(ROOT, 'tests', 'security', 'pentest');
+  const k6Binary   = process.env.PERF_K6_BINARY || 'k6';
+  const secPentestP95    = parseInt(process.env.SEC_PENTEST_P95    || '3000', 10);
+  const secPentestP99    = parseInt(process.env.SEC_PENTEST_P99    || '6000', 10);
+  const secPentestErr    = parseFloat(process.env.SEC_PENTEST_ERROR || '0.80');
+
+  const pentestScripts = fs.existsSync(pentestDir)
+    ? fs.readdirSync(pentestDir).filter(f => f.endsWith('.k6.js')).map(f => path.join(pentestDir, f))
+    : [];
+
+  if (pentestScripts.length === 0) {
+    console.log(`  ${C.dim}↷ No k6 pentest scripts found in tests/security/pentest/ — skipping${C.reset}`);
+  } else {
+    console.log(`  ${C.dim}→ Running ${pentestScripts.length} k6 pentest script(s)...${C.reset}`);
+    fs.mkdirSync(path.join(ROOT, 'test-results', 'security', 'pentest'), { recursive: true });
+
+    for (const scriptPath of pentestScripts) {
+      const scriptName = path.basename(scriptPath, '.k6.js');
+      const summaryOut = path.join(ROOT, 'test-results', 'security', 'pentest', `${scriptName}-summary.json`);
+      console.log(`  ${C.dim}→ k6 run: ${scriptName}${C.reset}`);
+
+      const k6Result = spawnSync(
+        k6Binary,
+        ['run', '--out', `json=${summaryOut.replace('.json', '-raw.json')}`, scriptPath],
+        {
+          cwd:      ROOT,
+          encoding: 'utf8',
+          env:      { ...process.env, BASE_URL: targetUrl },
+          timeout:  300000,
+        }
+      );
+
+      if (k6Result.error) {
+        console.log(`  ${C.yellow}⚠ k6 pentest run error: ${k6Result.error.message}${C.reset}`);
+        pentestFindings.push({
+          name: `Pentest script execution failed: ${scriptName}`,
+          severity: 'medium', owaspId: 'A07:2021',
+          cvss: 5.3, source: 'k6-pentest',
+        });
+        continue;
+      }
+
+      // Parse written summary JSON (k6 writes handleSummary output to disk)
+      const summaryPath = path.join(ROOT, 'test-results', 'security', 'pentest', `${scriptName}-summary.json`);
+      let metrics = null;
+      if (fs.existsSync(summaryPath)) {
+        try { metrics = JSON.parse(fs.readFileSync(summaryPath, 'utf8')); } catch { /* ignore */ }
+      }
+
+      if (metrics && metrics.metrics) {
+        const m = metrics.metrics;
+        const reqDur = m.http_req_duration;
+        const reqFail = m.http_req_failed;
+        const p95 = reqDur && reqDur.values && (reqDur.values['p(95)'] || reqDur.values.p95) || 0;
+        const p99 = reqDur && reqDur.values && (reqDur.values['p(99)'] || reqDur.values.p99) || 0;
+        const errRate = reqFail && reqFail.values && reqFail.values.rate || 0;
+
+        // p95 threshold breach — server not staying responsive under probes
+        if (p95 > secPentestP95) {
+          pentestFindings.push({
+            name: `Pentest: server response p95 ${Math.round(p95)}ms exceeds SLA ${secPentestP95}ms (${scriptName})`,
+            severity: 'medium', owaspId: 'A07:2021', cvss: 5.3, source: 'k6-pentest',
+          });
+        }
+        // p99 threshold breach
+        if (p99 > secPentestP99) {
+          pentestFindings.push({
+            name: `Pentest: server response p99 ${Math.round(p99)}ms exceeds SLA ${secPentestP99}ms (${scriptName})`,
+            severity: 'medium', owaspId: 'A07:2021', cvss: 4.3, source: 'k6-pentest',
+          });
+        }
+        // Error rate BELOW expected (server not rejecting bad credentials — auth bypass risk)
+        if (errRate < 0.50) {
+          pentestFindings.push({
+            name: `Pentest: low error rate ${(errRate * 100).toFixed(1)}% — server may not be rejecting adversarial inputs (${scriptName})`,
+            severity: 'high', owaspId: 'A07:2021', cvss: 7.5, source: 'k6-pentest',
+          });
+        }
+        console.log(`  ${k6Result.status === 0 ? C.green + '✓' : C.yellow + '⚠'} ${scriptName}: p95=${Math.round(p95)}ms p99=${Math.round(p99)}ms errRate=${(errRate * 100).toFixed(1)}%${C.reset}`);
+      } else if (k6Result.status !== 0) {
+        // k6 exit code non-zero = threshold failure
+        pentestFindings.push({
+          name: `Pentest: k6 threshold failure in ${scriptName} (exit ${k6Result.status})`,
+          severity: 'medium', owaspId: 'A03:2021', cvss: 5.3, source: 'k6-pentest',
+        });
+        console.log(`  ${C.yellow}⚠ ${scriptName}: k6 exited with code ${k6Result.status}${C.reset}`);
+      } else {
+        console.log(`  ${C.green}✓ ${scriptName}: completed (no summary metrics parsed)${C.reset}`);
+      }
+    }
+  }
+
+  console.log(`  ${C.green}✓ Pentest probes: ${pentestScripts.length} script(s), ${pentestFindings.length} finding(s)${C.reset}`);
+  stageLog(4, 'k6 Adversarial Pentest Probes', `DONE (${elapsed(s4pentest)}s)`);
+
+  // ── Stage 5 — Evaluate findings ──────────────────────────────────────────
+  stageLog(5, 'Evaluate findings', 'RUNNING');
   const s4 = Date.now();
 
   const { findings, summary } = secService.parseFindings(zapReportPath, customResults);
-  allFindings = findings;
+  allFindings = [...findings, ...pentestFindings];
 
   const severityPolicy = {
     failOn:    process.env.ZAP_FAIL_ON || 'high',
@@ -312,35 +425,35 @@ async function main() {
   console.log(`\n  Overall verdict: ${C.bold}${verdictCol}${verdict.toUpperCase()}${C.reset}`);
   console.log(`  Summary: Critical=${summary.critical} High=${summary.high} Medium=${summary.medium} Low=${summary.low} Info=${summary.informational}`);
 
-  stageLog(4, 'Evaluate findings', `DONE (${elapsed(s4)}s)`);
+  stageLog(5, 'Evaluate findings', `DONE (${elapsed(s4)}s)`);
 
-  // ── Stage 5 — Sync to Zephyr + create Jira bugs ──────────────────────────
-  stageLog(5, 'Sync to Zephyr + create Jira bugs', flags.skipSync ? 'SKIPPED' : 'RUNNING');
+  // ── Stage 6 — Sync to Zephyr + create Jira bugs ──────────────────────────
+  stageLog(6, 'Sync to Zephyr + create Jira bugs', flags.skipSync ? 'SKIPPED' : 'RUNNING');
   const s5 = Date.now();
   if (!flags.skipSync) {
     try {
-      await secService.syncToZephyrAndJira(findings, verdict, storyKey, { skipBugs: flags.skipBugs });
+      await secService.syncToZephyrAndJira(allFindings, verdict, storyKey, { skipBugs: flags.skipBugs });
       console.log(`  ${C.green}✓ Zephyr/Jira sync complete${C.reset}`);
     } catch (err) {
-      logger.warn(`[run-security] Stage 5 non-fatal: ${err.message}`);
+      logger.warn(`[run-security] Stage 6 non-fatal: ${err.message}`);
       console.log(`  ${C.yellow}⚠ Sync error (non-fatal): ${err.message}${C.reset}`);
     }
-    stageLog(5, 'Sync to Zephyr + create Jira bugs', `DONE (${elapsed(s5)}s)`);
+    stageLog(6, 'Sync to Zephyr + create Jira bugs', `DONE (${elapsed(s5)}s)`);
   }
 
-  // ── Stage 6 — Generate security report ──────────────────────────────────
-  stageLog(6, 'Generate security HTML report', flags.skipReport ? 'SKIPPED' : 'RUNNING');
+  // ── Stage 7 — Generate security report ──────────────────────────────────
+  stageLog(7, 'Generate security HTML report', flags.skipReport ? 'SKIPPED' : 'RUNNING');
   const s6 = Date.now();
   if (!flags.skipReport) {
     try {
       const { generateSecReport } = require('./generate-sec-report');
       const outputDir = path.join(ROOT, 'custom-report', 'security');
-      generateSecReport(findings, verdict, storyKey, outputDir);
+      generateSecReport(allFindings, verdict, storyKey, outputDir);
       console.log(`  ${C.green}✓ Report written to custom-report/security/index.html${C.reset}`);
     } catch (err) {
-      logger.warn(`[run-security] Stage 6 non-fatal: ${err.message}`);
+      logger.warn(`[run-security] Stage 7 non-fatal: ${err.message}`);
     }
-    stageLog(6, 'Generate security HTML report', `DONE (${elapsed(s6)}s)`);
+    stageLog(7, 'Generate security HTML report', `DONE (${elapsed(s6)}s)`);
   }
 
   // Always stop ZAP (even if earlier stages threw)
@@ -351,8 +464,8 @@ async function main() {
     } catch { /* ignore */ }
   }
 
-  // ── Stage 7 — Git agent ──────────────────────────────────────────────────
-  stageLog(7, 'Git Agent — auto-commit + push', flags.skipGit ? 'SKIPPED' : 'RUNNING');
+  // ── Stage 8 — Git agent ──────────────────────────────────────────────────
+  stageLog(8, 'Git Agent — auto-commit + push', flags.skipGit ? 'SKIPPED' : 'RUNNING');
   const s7 = Date.now();
   if (!flags.skipGit) {
     try {
@@ -362,9 +475,9 @@ async function main() {
         console.log(`  ${C.green}✓ Git sync complete${C.reset}`);
       }
     } catch (err) {
-      logger.warn(`[run-security] Stage 7 non-fatal: ${err.message}`);
+      logger.warn(`[run-security] Stage 8 non-fatal: ${err.message}`);
     }
-    stageLog(7, 'Git Agent — auto-commit + push', `DONE (${elapsed(s7)}s)`);
+    stageLog(8, 'Git Agent — auto-commit + push', `DONE (${elapsed(s7)}s)`);
   }
 
   // ── Final banner ─────────────────────────────────────────────────────────
@@ -374,7 +487,7 @@ async function main() {
   console.log(`\n${C.bold}${C.magenta}╔══════════════════════════════════════════════════════╗`);
   console.log(`║  Security Pipeline Complete                          ║`);
   console.log(`╠══════════════════════════════════════════════════════╣`);
-  console.log(`║  Total findings  : ${String(findings.length).padEnd(33)}║`);
+  console.log(`║  Total findings  : ${String(allFindings.length).padEnd(33)}║`);
   console.log(`║  Critical        : ${C.magenta}${String(summary.critical).padEnd(33)}${C.reset}${C.bold}${C.magenta}║`);
   console.log(`║  High            : ${C.red}${String(summary.high).padEnd(33)}${C.reset}${C.bold}${C.magenta}║`);
   console.log(`║  Medium          : ${C.yellow}${String(summary.medium).padEnd(33)}${C.reset}${C.bold}${C.magenta}║`);

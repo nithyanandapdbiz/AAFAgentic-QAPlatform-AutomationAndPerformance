@@ -180,7 +180,7 @@ async function main() {
   console.log(`\n${C.bold}${C.blue}╔══════════════════════════════════════════════════════╗`);
   console.log(`║  Agentic QA — Performance Pipeline (6 stages)       ║`);
   console.log(`║  Test types: load|stress|spike|soak|scalability      ║`);
-  console.log(`║             breakpoint|pentest                        ║`);
+  console.log(`║             breakpoint                                ║`);
   if (flags.dryRun) console.log(`║  ${C.yellow}DRY-RUN MODE — no k6 execution${C.reset}${C.bold}${C.blue}                      ║`);
   console.log(`╚══════════════════════════════════════════════════════╝${C.reset}\n`);
 
@@ -240,9 +240,8 @@ async function main() {
   const spikeScripts        = scripts.filter(s => typeOf(s) === 'spike');
   const soakScripts         = scripts.filter(s => typeOf(s) === 'soak' && !perfConfig.skipSoak);
   const skippedSoakScripts  = scripts.filter(s => typeOf(s) === 'soak' &&  perfConfig.skipSoak);
-  // pentest scripts run sequentially after all other types — adversarial probes must be
-  // isolated so their traffic does not skew concurrent load/spike/soak measurements.
-  const sequentialScripts   = scripts.filter(s => ['scalability', 'breakpoint', 'pentest'].includes(typeOf(s)));
+  // scalability and breakpoint run sequentially after load/stress/spike/soak
+  const sequentialScripts   = scripts.filter(s => ['scalability', 'breakpoint'].includes(typeOf(s)));
 
   async function runGroup(group, label) {
     if (group.length === 0) return;

@@ -8,7 +8,7 @@
  *  Stages:
  *   ┌──────────────────────────────────────────────────────────────────────────┐
  *   │  Stage 1  Performance tests — k6 load/stress/spike/soak/scalability/    │
- *   │           breakpoint/pentest  (six-stage k6 pipeline internally)        │
+ *   │           breakpoint  (six-stage k6 pipeline internally)                │
  *   │  Stage 2  Security tests — OWASP ZAP passive/active scan + custom       │
  *   │           injection, auth-bypass, header, CSRF, cookie checks           │
  *   │  Stage 3  Git Agent — auto-commit + push all reports                   │
@@ -22,7 +22,7 @@
  *   node scripts/run-nonfunctional.js --skip-git        ← skip git auto-commit
  *
  * Performance flags forwarded to run-perf.js:
- *   --test-type=<type>    Only run one type (load|stress|spike|soak|scalability|breakpoint|pentest)
+ *   --test-type=<type>    Only run one type (load|stress|spike|soak|scalability|breakpoint)
  *   --skip-generate       Skip k6 script generation step
  *   --skip-sync           Skip Zephyr sync in perf pipeline
  *   --dry-run             Print k6 commands but do not execute

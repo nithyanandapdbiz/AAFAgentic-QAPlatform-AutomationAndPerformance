@@ -151,7 +151,6 @@ const TYPE_COLOURS = {
   soak:        '#6a1b9a',
   scalability: '#00695c',
   breakpoint:  '#bf360c',
-  pentest:     '#c2185b',
 };
 
 function typePill(t) {

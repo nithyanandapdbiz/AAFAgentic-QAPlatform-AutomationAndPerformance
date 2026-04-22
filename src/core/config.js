@@ -20,9 +20,6 @@ const perfConfig = {
     soak:        { p95: parseInt(process.env.PERF_SOAK_P95    || '2200',  10), p99: parseInt(process.env.PERF_SOAK_P99    || '4500',  10), errorRate: parseFloat(process.env.PERF_SOAK_ERROR    || '0.005') },
     scalability: { p95: parseInt(process.env.PERF_SCALE_P95   || '3000',  10), p99: parseInt(process.env.PERF_SCALE_P99   || '5500',  10), errorRate: parseFloat(process.env.PERF_SCALE_ERROR   || '0.015') },
     breakpoint:  { p95: parseInt(process.env.PERF_BREAK_P95   || '99999', 10), p99: parseInt(process.env.PERF_BREAK_P99   || '99999', 10), errorRate: parseFloat(process.env.PERF_BREAK_ERROR   || '0.10') },
-    // pentest — adversarial probes: expect high error rates (auth rejection, rate-limiting);
-    // measure that the server stays responsive under attack-pattern traffic.
-    pentest:     { p95: parseInt(process.env.PERF_PENTEST_P95 || '3000',  10), p99: parseInt(process.env.PERF_PENTEST_P99 || '6000',  10), errorRate: parseFloat(process.env.PERF_PENTEST_ERROR || '0.80') },
   },
 
   // Per-metric baseline regression tolerances
@@ -69,6 +66,19 @@ const perfConfig = {
   }
 })();
 
+// ─── Security Config ──────────────────────────────────────────────────────────
+// Pentest (k6 adversarial probes) is a SECURITY discipline, not a performance one.
+// It runs inside the security pipeline (run-security.js Stage 4) alongside ZAP scans.
+const secConfig = {
+  pentest: {
+    // Server must stay responsive under adversarial traffic (p95/p99 SLAs).
+    p95:       parseInt(process.env.SEC_PENTEST_P95    || '3000',  10),
+    p99:       parseInt(process.env.SEC_PENTEST_P99    || '6000',  10),
+    // High error rate expected: 401/403/429 from auth-rejection / rate-limiting IS correct behavior.
+    errorRate: parseFloat(process.env.SEC_PENTEST_ERROR || '0.80'),
+  },
+};
+
 module.exports = {
   port: process.env.PORT || 3000,
   jira: {
@@ -86,6 +96,7 @@ module.exports = {
     projectKey: process.env.PROJECT_KEY
   },
   perf: perfConfig,
+  sec:  secConfig,
   agent: {
     // Minimum confidence required for a planner category to be selected.
     // Also used by QA agent to trigger fallback test cases.
