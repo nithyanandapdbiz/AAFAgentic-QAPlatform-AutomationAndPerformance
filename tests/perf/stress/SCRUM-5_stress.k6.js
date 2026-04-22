@@ -1,6 +1,6 @@
 // storyKey: SCRUM-5
 // testType: stress
-// generated: 2026-04-22T06:12:27.228Z
+// generated: 2026-04-22T07:01:58.898Z
 // WARNING: Journey could not be inferred — manual customisation required.
 
 import http from 'k6/http';

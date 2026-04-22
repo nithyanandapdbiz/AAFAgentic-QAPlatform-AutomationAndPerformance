@@ -1,5 +1,5 @@
 // =============================================================================
-// Zephyr Test Case : SCRUM-T205
+// Zephyr Test Case : SCRUM-T223
 // Title            : Verify duplicate Employee Creation in OrangeHRM is prevented
 // Priority         : Normal
 // Labels           : validation, negative, duplicate, error-guessing, scrum-5
@@ -25,7 +25,7 @@
 const { test, expect }                = require('../fixtures/base.fixture');
 const { CREDENTIALS, TEST_EMPLOYEE } = require('../data/testData');
 
-test.describe('SCRUM-T205 | Verify duplicate Employee Creation in OrangeHRM is prevented', () => {
+test.describe('SCRUM-T223 | Verify duplicate Employee Creation in OrangeHRM is prevented', () => {
 
   test('Verify duplicate Employee Creation in OrangeHRM is prevented', async ({ page, loginPage, addEmployeePage, employeeListPage, sh, uniqueSuffix }, testInfo) => {
 

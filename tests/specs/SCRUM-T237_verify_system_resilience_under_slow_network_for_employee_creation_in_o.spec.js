@@ -1,5 +1,5 @@
 // =============================================================================
-// Zephyr Test Case : SCRUM-T220
+// Zephyr Test Case : SCRUM-T237
 // Title            : Verify system resilience under slow network for Employee Creation in OrangeHRM
 // Priority         : Normal
 // Labels           : performance, error-guessing, dynamic-generated, network-resilience, scrum-5
@@ -22,7 +22,7 @@
 const { test, expect }                = require('../fixtures/base.fixture');
 const { CREDENTIALS, TEST_EMPLOYEE } = require('../data/testData');
 
-test.describe('SCRUM-T220 | Verify system resilience under slow network for Employee Creation in OrangeHRM', () => {
+test.describe('SCRUM-T237 | Verify system resilience under slow network for Employee Creation in OrangeHRM', () => {
 
   test('Verify system resilience under slow network for Employee Creation in OrangeHRM', async ({ page, loginPage, addEmployeePage, employeeListPage, sh, uniqueSuffix }, testInfo) => {
 

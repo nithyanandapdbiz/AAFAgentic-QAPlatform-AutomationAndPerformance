@@ -1,5 +1,5 @@
 // =============================================================================
-// Zephyr Test Case : SCRUM-T216
+// Zephyr Test Case : SCRUM-T233
 // Title            : Verify cancel or discard action during Employee Creation in OrangeHRM
 // Priority         : Normal
 // Labels           : negative, cancel, data-integrity, state-transition, scrum-5
@@ -24,7 +24,7 @@
 const { test, expect }                = require('../fixtures/base.fixture');
 const { CREDENTIALS, TEST_EMPLOYEE } = require('../data/testData');
 
-test.describe('SCRUM-T216 | Verify cancel or discard action during Employee Creation in OrangeHRM', () => {
+test.describe('SCRUM-T233 | Verify cancel or discard action during Employee Creation in OrangeHRM', () => {
 
   test('Verify cancel or discard action during Employee Creation in OrangeHRM', async ({ page, loginPage, addEmployeePage, employeeListPage, sh, uniqueSuffix }, testInfo) => {
 
