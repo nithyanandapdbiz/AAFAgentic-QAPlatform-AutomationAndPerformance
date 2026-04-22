@@ -1,17 +1,18 @@
 'use strict';
 /**
- * run-security-only.js  —  Security Tests Only
- * ─────────────────────────────────────────────────────────────────────────────
- * Dedicated entry point for security testing. Runs the full seven-stage
- * security pipeline (generate config → start ZAP → passive scan → active scan →
- * evaluate findings → generate report → git sync) with no functional (Playwright)
- * or performance (k6) testing.
+ * run-security-only.js  —  Security + Penetration Tests Only
+ * ───────────────────────────────────────────────────────────────────────────
+ * Dedicated entry point for security + penetration testing. Runs the full
+ * eight-stage security pipeline (generate config → start ZAP → passive scan
+ * → active scan → evaluate findings → generate report → pentest → git sync)
+ * with no functional (Playwright) or performance (k6) testing.
  *
  * All flags are forwarded directly to run-security.js.
  *
- * ─── Usage ───────────────────────────────────────────────────────────────────
- *   node scripts/run-security-only.js              ← full security pipeline
+ * ─── Usage ───────────────────────────────────────────────────────────────────────────
+ *   node scripts/run-security-only.js              ← full security + pentest
  *   node scripts/run-security-only.js --no-zap     ← custom checks only (no ZAP)
+ *   node scripts/run-security-only.js --skip-pentest ← security only (no pentest)
  *   node scripts/run-security-only.js --skip-git   ← skip git auto-commit
  *
  * OWASP ZAP is optional. To enable auto-launch set in .env:
@@ -53,25 +54,33 @@ const C = {
 function now() { return new Date().toLocaleTimeString('en-GB', { hour12: false }); }
 
 // ─── Banner ───────────────────────────────────────────────────────────────────
-const args   = process.argv.slice(2);
-const noZap  = args.includes('--no-zap');
-const zapPath = process.env.ZAP_PATH || '';
+const args         = process.argv.slice(2);
+const noZap        = args.includes('--no-zap');
+const skipPentest  = args.includes('--skip-pentest');
+const zapPath      = process.env.ZAP_PATH || '';
+const pentestEnabled = process.env.PENTEST_ENABLED === 'true';
 const zapMode = noZap
   ? 'Custom checks only (--no-zap)'
   : zapPath
-    ? `ZAP + custom checks  (${zapPath.split(/[\\/]/).pop()})`
+    ? `ZAP + custom checks  (${zapPath.split(/[\/]/).pop()})`
     : 'Custom checks only  (ZAP_PATH not configured)';
+const pentestMode = skipPentest
+  ? 'SKIPPED (--skip-pentest)'
+  : !pentestEnabled
+    ? 'disabled — set PENTEST_ENABLED=true in .env'
+    : 'ON — Nuclei · SQLMap · ffuf · ZAP-Auth';
 
 const W = 58;
 const B = '═'.repeat(W);
 const pad = s => s + ' '.repeat(Math.max(0, W - s.length - 1));
 const row = s => `${C.bold}${C.red}║  ${C.reset}${pad(s)}${C.bold}${C.red}║${C.reset}`;
 console.log(`\n${C.bold}${C.red}╔${B}╗${C.reset}`);
-console.log(row('Agentic QA Platform  —  Security Tests Only'));
+console.log(row('Agentic QA Platform  —  Security + Pentest'));
 console.log(row(''));
 console.log(row(`ZAP      : ${zapMode}`));
 console.log(row('Custom   : SQLi · XSS · Auth-bypass · Headers'));
 console.log(row('           CSRF · Cookie flags'));
+console.log(row(`Pentest  : ${pentestMode}`));
 console.log(row(''));
 console.log(row(`Issue    : ${process.env.ISSUE_KEY || '(set ISSUE_KEY in .env)'}`));
 console.log(row(`Target   : ${process.env.BASE_URL  || '(set BASE_URL in .env)'}`));

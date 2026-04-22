@@ -3,21 +3,25 @@
  * run-nonfunctional.js  —  Non-Functional Test Pipeline
  * ─────────────────────────────────────────────────────────────────────────────
  * Dedicated runner for NON-FUNCTIONAL testing: Performance (k6) + Security
- * (OWASP ZAP + custom checks). No Playwright / functional specs are involved.
+ * (OWASP ZAP + custom checks) + Penetration Testing (Nuclei/SQLMap/ffuf).
+ * No Playwright / functional specs are involved.
  *
  *  Stages:
- *   ┌──────────────────────────────────────────────────────────────────────────┐
+ *   ┌──────────────────────────────────────────────────────────────────────┐
  *   │  Stage 1  Performance tests — k6 load/stress/spike/soak/scalability/    │
  *   │           breakpoint  (six-stage k6 pipeline internally)                │
  *   │  Stage 2  Security tests — OWASP ZAP passive/active scan + custom       │
  *   │           injection, auth-bypass, header, CSRF, cookie checks           │
- *   │  Stage 3  Git Agent — auto-commit + push all reports                   │
+ *   │  Stage 3  Penetration Tests — Nuclei CVE scan + SQLMap injection +      │
+ *   │           ffuf endpoint fuzzing + ZAP authenticated scan                │
+ *   │  Stage 4  Git Agent — auto-commit + push all reports                   │
  *   └──────────────────────────────────────────────────────────────────────────┘
  *
  * ─── Usage ───────────────────────────────────────────────────────────────────
- *   node scripts/run-nonfunctional.js                   ← perf + security
- *   node scripts/run-nonfunctional.js --skip-perf       ← security tests only
- *   node scripts/run-nonfunctional.js --skip-security   ← performance tests only
+ *   node scripts/run-nonfunctional.js                   ← perf + security + pentest
+ *   node scripts/run-nonfunctional.js --skip-perf       ← security + pentest only
+ *   node scripts/run-nonfunctional.js --skip-security   ← perf + pentest only
+ *   node scripts/run-nonfunctional.js --skip-pentest    ← perf + security only
  *   node scripts/run-nonfunctional.js --no-zap          ← security without ZAP scan
  *   node scripts/run-nonfunctional.js --skip-git        ← skip git auto-commit
  *
@@ -42,6 +46,7 @@ const flags = new Set(args.map(a => a.toLowerCase()));
 
 const skipPerf     = flags.has('--skip-perf');
 const skipSecurity = flags.has('--skip-security');
+const skipPentest  = flags.has('--skip-pentest');
 const skipGit      = flags.has('--skip-git');
 const noZap        = flags.has('--no-zap');
 
@@ -71,11 +76,12 @@ function banner() {
   console.log(`\n${C.bold}${C.magenta}╔${B}╗${C.reset}`);
   console.log(row('Agentic QA Platform  —  Non-Functional Test Pipeline'));
   console.log(row(''));
-  console.log(row('Scope    : Performance (k6) + Security (ZAP)'));
+  console.log(row(`Scope    : Performance (k6) + Security (ZAP) + Pentest`));
   console.log(row('Functional (Playwright): EXCLUDED'));
   console.log(row(''));
   console.log(row(`Performance : ${skipPerf     ? 'SKIPPED (--skip-perf)'     : 'ON — k6 multi-type load tests'}`));
   console.log(row(`Security    : ${skipSecurity  ? 'SKIPPED (--skip-security)' : `ON — ZAP${noZap ? ' disabled' : ''} + custom checks`}`));
+  console.log(row(`Pentest     : ${skipPentest   ? 'SKIPPED (--skip-pentest)'  : (process.env.PENTEST_ENABLED === 'true' ? 'ON — Nuclei · SQLMap · ffuf · ZAP-Auth' : 'disabled (set PENTEST_ENABLED=true)')}`));
   console.log(row(`Git         : ${skipGit       ? 'SKIPPED (--skip-git)'      : 'ON — auto-commit + push'}`));
   console.log(row(`Issue       : ${process.env.ISSUE_KEY || '(set ISSUE_KEY in .env)'}`));
   console.log(row(`Time        : ${now()}`));
@@ -115,12 +121,12 @@ async function main() {
   const pipelineStart = Date.now();
   banner();
 
-  if (skipPerf && skipSecurity) {
-    console.log(`${C.yellow}  Both --skip-perf and --skip-security passed — nothing to run.${C.reset}\n`);
+  if (skipPerf && skipSecurity && skipPentest) {
+    console.log(`${C.yellow}  All non-functional pillars skipped — nothing to run.${C.reset}\n`);
     process.exit(0);
   }
 
-  const TOTAL   = 3;   // perf, security, git
+  const TOTAL   = 4;   // perf, security, pentest, git
   const summary = [];
 
   // ── Stage 1: Performance ────────────────────────────────────────────────────
@@ -146,7 +152,7 @@ async function main() {
     summary.push({ num: 2, label: 'Security (ZAP + checks)', status: 'SKIP', ms: 0 });
   } else {
     const t2 = Date.now();
-    const secArgs = ['--skip-git'];
+    const secArgs = ['--skip-git', '--skip-pentest'];
     if (noZap) secArgs.push('--no-zap');
     const { ok, exitCode } = runScript('scripts/run-security.js', secArgs);
     const ms2 = Date.now() - t2;
@@ -155,17 +161,35 @@ async function main() {
     // Security findings are warnings — report is generated but pipeline continues
   }
 
-  // ── Stage 3: Git sync ───────────────────────────────────────────────────────
-  stageHeader(3, TOTAL, 'Git Agent — auto-commit + push all reports', skipGit);
-  if (skipGit) {
-    console.log(`  ${C.yellow}↷  Skipped — --skip-git passed${C.reset}\n`);
-    summary.push({ num: 3, label: 'Git sync', status: 'SKIP', ms: 0 });
+  // ── Stage 3: Penetration Tests ──────────────────────────────────────────────
+  stageHeader(3, TOTAL, 'Penetration Tests (Nuclei · SQLMap · ffuf · ZAP-Auth)', skipPentest || process.env.PENTEST_ENABLED !== 'true');
+  if (skipPentest) {
+    console.log(`  ${C.yellow}↷  Skipped — --skip-pentest passed${C.reset}\n`);
+    summary.push({ num: 3, label: 'Pentest (Nuclei+ffuf)', status: 'SKIP', ms: 0 });
+  } else if (process.env.PENTEST_ENABLED !== 'true') {
+    console.log(`  ${C.yellow}↷  Skipped — PENTEST_ENABLED not set to true in .env${C.reset}\n`);
+    summary.push({ num: 3, label: 'Pentest (Nuclei+ffuf)', status: 'SKIP', ms: 0 });
   } else {
     const t3 = Date.now();
-    const { ok } = runScript('scripts/git-sync.js');
+    const pentestArgs = ['--skip-git', '--no-pause'];
+    const { ok, exitCode } = runScript('scripts/run-pentest.js', pentestArgs);
     const ms3 = Date.now() - t3;
-    stageDone(3, 'Git sync', ok || true, ms3);
-    summary.push({ num: 3, label: 'Git sync', status: ok ? 'PASS' : 'WARN', ms: ms3 });
+    stageDone(3, 'Penetration Tests', ok, ms3);
+    summary.push({ num: 3, label: 'Pentest (Nuclei+ffuf)', status: ok ? 'PASS' : 'WARN', ms: ms3, exitCode });
+    // Pentest findings are warnings — pipeline continues regardless
+  }
+
+  // ── Stage 4: Git sync ───────────────────────────────────────────────────
+  stageHeader(4, TOTAL, 'Git Agent — auto-commit + push all reports', skipGit);
+  if (skipGit) {
+    console.log(`  ${C.yellow}↷  Skipped — --skip-git passed${C.reset}\n`);
+    summary.push({ num: 4, label: 'Git sync', status: 'SKIP', ms: 0 });
+  } else {
+    const t4 = Date.now();
+    const { ok } = runScript('scripts/git-sync.js', []);
+    const ms4 = Date.now() - t4;
+    stageDone(4, 'Git sync', ok || true, ms4);
+    summary.push({ num: 4, label: 'Git sync', status: ok ? 'PASS' : 'WARN', ms: ms4 });
   }
 
   // ─── Summary ─────────────────────────────────────────────────────────────────

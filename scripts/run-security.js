@@ -1,5 +1,5 @@
 'use strict';
-/** @module run-security — Seven-stage standalone security pipeline: generate config, start ZAP, run scans, evaluate findings, sync, report, git. */
+/** @module run-security — Eight-stage standalone security pipeline: generate config, start ZAP, run scans, evaluate findings, sync, report, pentest, git. */
 
 require('dotenv').config();
 const fs     = require('fs');
@@ -92,6 +92,7 @@ const flags = {
   skipBugs:     flagSet.has('--skip-bugs'),
   skipReport:   flagSet.has('--skip-report'),
   skipGit:      flagSet.has('--skip-git'),
+  skipPentest:  flagSet.has('--skip-pentest'),
 };
 
 // ─── ANSI ─────────────────────────────────────────────────────────────────────
@@ -118,8 +119,8 @@ async function main() {
   const targetUrl = process.env.BASE_URL  || 'https://opensource-demo.orangehrmlive.com';
 
   console.log(`\n${C.bold}${C.magenta}╔══════════════════════════════════════════════════════╗`);
-  console.log(`║  Agentic QA — Security Pipeline (7 stages)          ║`);
-  console.log(`║  (ZAP passive/active + 18 custom security checks)    ║`);
+  console.log(`║  Agentic QA — Security Pipeline (8 stages)          ║`);
+  console.log(`║  ZAP passive/active + 18 custom checks + Pentest     ║`);
   console.log(`╚══════════════════════════════════════════════════════╝${C.reset}\n`);
 
   const secService = require('../src/services/sec.execution.service');
@@ -370,9 +371,33 @@ async function main() {
     } catch { /* ignore */ }
   }
 
-  // ── Stage 7 — Git agent ──────────────────────────────────────────────────
-  stageLog(7, 'Git Agent — auto-commit + push', flags.skipGit ? 'SKIPPED' : 'RUNNING');
+  // ── Stage 7 — Penetration Test ─────────────────────────────────────────────
+  const pentestEnabled   = process.env.PENTEST_ENABLED === 'true';
+  const skipPentestStage = flags.skipPentest || !pentestEnabled;
+  stageLog(7, 'Penetration Test (Nuclei · SQLMap · ffuf · ZAP-Auth)', skipPentestStage ? 'SKIPPED' : 'RUNNING');
   const s7 = Date.now();
+  if (!skipPentestStage) {
+    try {
+      const pentestScript = path.join(ROOT, 'scripts', 'run-pentest.js');
+      const pr = spawnSync('node', [pentestScript, '--skip-git', '--skip-sync', '--no-pause'], {
+        cwd: ROOT, stdio: 'inherit', env: process.env,
+      });
+      const pentestOk = (pr.status ?? (pr.error ? 1 : 0)) === 0;
+      console.log(`  ${pentestOk ? C.green + '✓' : C.yellow + '⚠'}${C.reset} Pentest ${pentestOk ? 'complete' : 'completed with warnings'}`);
+    } catch (err) {
+      logger.warn(`[run-security] Stage 7 pentest non-fatal: ${err.message}`);
+    }
+    stageLog(7, 'Penetration Test', `DONE (${elapsed(s7)}s)`);
+  } else {
+    const reason = !pentestEnabled
+      ? 'set PENTEST_ENABLED=true in .env to enable'
+      : '--skip-pentest passed';
+    console.log(`  ${C.dim}↷ Pentest skipped — ${reason}${C.reset}`);
+  }
+
+  // ── Stage 8 — Git agent ──────────────────────────────────────────────────
+  stageLog(8, 'Git Agent — auto-commit + push', flags.skipGit ? 'SKIPPED' : 'RUNNING');
+  const s8 = Date.now();
   if (!flags.skipGit) {
     try {
       const gitSync = require('./git-sync');
@@ -381,9 +406,9 @@ async function main() {
         console.log(`  ${C.green}✓ Git sync complete${C.reset}`);
       }
     } catch (err) {
-      logger.warn(`[run-security] Stage 7 non-fatal: ${err.message}`);
+      logger.warn(`[run-security] Stage 8 non-fatal: ${err.message}`);
     }
-    stageLog(7, 'Git Agent — auto-commit + push', `DONE (${elapsed(s7)}s)`);
+    stageLog(8, 'Git Agent — auto-commit + push', `DONE (${elapsed(s8)}s)`);
   }
 
   // ── Final banner ─────────────────────────────────────────────────────────

@@ -28,14 +28,14 @@
  *  │  Phase C  — REPORT                                                      │
  *  │   Stage 11 Generate functional HTML report                              │
  *  │   Stage 12 Generate performance HTML report (Chart.js)                  │
- *  │   Stage 13 Generate security HTML report   (Chart.js)                   │
- *  │   Stage 14 Generate Allure interactive report                           │
+ *  │   Stage 13 Generate security HTML report   (Chart.js)                   │ *  │   Stage 13b Generate pentest HTML report                                │ *  │   Stage 14 Generate Allure interactive report                           │
  *  │   Stage 15 Git Agent — auto-commit + push all outputs                  │
  *  └─────────────────────────────────────────────────────────────────────────┘
  *
  * ─── Usage ───────────────────────────────────────────────────────────────────
  *   node scripts/run-e2e.js                        ← full e2e (all 3 pillars)
  *   node scripts/run-e2e.js --headless             ← CI / headless browser
+ *   node scripts/run-e2e.js --skip-pentest        ← skip pentest pillar
  *   node scripts/run-e2e.js --skip-perf            ← skip performance pillar
  *   node scripts/run-e2e.js --skip-security        ← skip security pillar
  *   node scripts/run-e2e.js --no-zap               ← custom checks only (no ZAP)
@@ -65,6 +65,7 @@ const useForce       = flags.has('--force');
 const skipStory      = flags.has('--skip-story');
 const skipPerf       = flags.has('--skip-perf');
 const skipSecurity   = flags.has('--skip-security');
+const skipPentest    = flags.has('--skip-pentest');
 const noZap          = flags.has('--no-zap');
 const skipHeal       = flags.has('--skip-heal');
 const skipSmartHeal  = flags.has('--skip-smart-heal');
@@ -93,7 +94,7 @@ function banner() {
   console.log(row('Agentic QA Platform  —  Complete End-to-End Run', C.white));
   console.log(row(''));
   console.log(row('  Phase A: Prepare  →  Phase B: Execute  →  Phase C: Report', C.dim));
-  console.log(row(`  Pillars: Functional  +  ${skipPerf ? C.dim + '(Perf skipped)' : C.cyan + 'Performance'}${C.reset}${C.bold}${C.purple}  +  ${skipSecurity ? C.dim + '(Security skipped)' : C.orange + 'Security'}`, ''));
+  console.log(row(`  Pillars: Functional  +  ${skipPerf ? C.dim + '(Perf skipped)' : C.cyan + 'Performance'}${C.reset}${C.bold}${C.purple}  +  ${skipSecurity ? C.dim + '(Security skipped)' : C.orange + 'Security'}${C.reset}${C.bold}${C.purple}  +  ${skipPentest ? C.dim + '(Pentest skipped)' : C.red + 'Pentest'}`, ''));
   console.log(row(`  Healing: Proactive (smart-healer)  +  Reactive (healer)${skipSmartHeal ? C.dim + '  [--skip-smart-heal]' : ''}`, C.dim));
   console.log(row(''));
   console.log(row(`  Story  : ${process.env.ISSUE_KEY || '(set ISSUE_KEY in .env)'}`, C.white));
@@ -237,9 +238,20 @@ const STAGES = [
     skipMsg: 'Security testing skipped  (--skip-security)',
     softFail: true,
     extraArgs: () => [
-      '--skip-report', '--skip-git',
+      '--skip-report', '--skip-git', '--skip-pentest',
       ...(noZap ? ['--no-zap'] : []),
     ],
+  },
+  {
+    num: '10b', label: 'Run penetration tests (Nuclei · SQLMap · ffuf · ZAP-Auth)',
+    phase: 'B',
+    script: 'scripts/run-pentest.js',
+    skip: () => skipPentest || process.env.PENTEST_ENABLED !== 'true',
+    skipMsg: process.env.PENTEST_ENABLED !== 'true'
+      ? 'Pentest skipped  (set PENTEST_ENABLED=true in .env)'
+      : 'Pentest skipped  (--skip-pentest)',
+    softFail: true,
+    extraArgs: () => ['--skip-report', '--skip-git', '--skip-sync', '--no-pause'],
   },
 
   // ── PHASE C: REPORT ────────────────────────────────────────────────────────
@@ -264,6 +276,14 @@ const STAGES = [
     script: 'scripts/generate-sec-report.js',
     skip: () => skipSecurity,
     skipMsg: 'Security report skipped  (--skip-security)',
+    softFail: true,
+  },
+  {
+    num: '13b', label: 'Generate pentest HTML report',
+    phase: 'C',
+    script: 'scripts/generate-pentest-report.js',
+    skip: () => skipPentest || process.env.PENTEST_ENABLED !== 'true',
+    skipMsg: 'Pentest report skipped  (--skip-pentest / PENTEST_ENABLED not true)',
     softFail: true,
   },
   {
@@ -394,6 +414,7 @@ function printSummary(summary, t0) {
     ['custom-report/index.html',          '📄  Functional Report'],
     ['custom-report/perf/index.html',     '📈  Performance Report'],
     ['custom-report/security/index.html', '🛡️   Security Report'],
+    ['custom-report/pentest/index.html',  '🔐  Pentest Report'],
     ['allure-report/index.html',          '📊  Allure Report'],
   ];
   let hasOutputs = false;
