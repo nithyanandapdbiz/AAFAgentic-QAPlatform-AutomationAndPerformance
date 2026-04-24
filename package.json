@@ -21,6 +21,7 @@
     "perf:generate": "node scripts/generate-perf-scripts.js",
     "perf:report": "node scripts/generate-perf-report.js",
     "perf:dry-run": "node scripts/run-perf.js --dry-run",
+    "perf:sync-testcases": "node scripts/sync-perf-testcases.js",
     "qa:with-perf": "node scripts/qa-run.js --include-perf",
     "security": "node scripts/run-security.js",
     "security:no-zap": "node scripts/run-security.js --no-zap",

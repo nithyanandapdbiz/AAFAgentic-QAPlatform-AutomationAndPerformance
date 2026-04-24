@@ -1,1 +1,8 @@
-{}
+{
+  "SCRUM-5_load": "SCRUM-T2241",
+  "SCRUM-5_stress": "SCRUM-T2242",
+  "SCRUM-5_spike": "SCRUM-T2243",
+  "SCRUM-5_soak": "SCRUM-T2244",
+  "SCRUM-5_breakpoint": "SCRUM-T2245",
+  "SCRUM-5_scalability": "SCRUM-T2246"
+}

@@ -322,10 +322,86 @@ async function main() {
       const jiraBug    = require('../src/tools/jiraBug.client');
       const { createExecution } = zephyrExec;
 
+      // Resolve a Zephyr test cycle. Empty cycleKey causes Zephyr to 400 on
+      // POST /testexecutions, so if the env var isn't set we auto-create a
+      // dedicated perf cycle for this run and reuse it for every execution.
+      let cycleKey = (process.env.ZEPHYR_CYCLE_KEY || '').trim();
+      if (!cycleKey) {
+        try {
+          const { createTestCycle } = require('../src/tools/zephyrCycle.client');
+          const storyKey = (allResults.find(r => r.storyKey) || {}).storyKey
+            || process.env.ISSUE_KEY || 'PERF';
+          const ts = new Date().toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '-');
+          const cycleName = `PerfRun-${storyKey}-${ts}`;
+          const cycle = await retry(() => createTestCycle(cycleName, {
+            description:      `Auto-created performance test cycle for ${storyKey}.\nTriggered: ${new Date().toISOString()}\nRunner: scripts/run-perf.js`,
+            plannedStartDate: new Date().toISOString(),
+            plannedEndDate:   new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+            statusName:       'In Progress'
+          }), 3, 1500);
+          cycleKey = cycle.key;
+          console.log(`  ${C.green}✓${C.reset} Created Zephyr perf cycle: ${cycleKey}`);
+          logger.info(`[run-perf] auto-created perf cycle ${cycleKey}`);
+        } catch (e) {
+          const detail = e.response?.data ? JSON.stringify(e.response.data) : e.message;
+          console.warn(`  ${C.yellow}⚠ Could not auto-create perf cycle — Zephyr sync will be skipped: ${detail}${C.reset}`);
+          logger.warn(`[run-perf] cycle auto-create failed: ${detail}`);
+        }
+      }
+
       const tcMapPath = path.join(ROOT, 'tests', 'perf', 'perf-testcase-map.json');
       let tcMap = {};
       if (fs.existsSync(tcMapPath)) {
         try { tcMap = JSON.parse(fs.readFileSync(tcMapPath, 'utf8')); } catch { /* ignore */ }
+      }
+
+      // Auto-create Zephyr test cases for any perf script that isn't yet mapped.
+      // Keeps the pipeline self-healing — first run of a new story creates the
+      // test cases, subsequent runs reuse them.
+      const unmappedBasenames = allResults
+        .filter(r => !r.skipped && !r.dryRun && !tcMap[r.basename])
+        .map(r => r.basename);
+      if (unmappedBasenames.length > 0) {
+        try {
+          const { createTestCase } = require('../src/tools/zephyr.client');
+          const PROFILE_DESC = {
+            load:        'Sustained representative user load — validates steady-state p95/p99 latency and error-rate SLAs.',
+            stress:      'Beyond-expected load — identifies the breaking point and graceful-degradation behaviour.',
+            spike:       'Sudden traffic burst — validates resilience to rapid user increases and recovery afterwards.',
+            soak:        'Extended duration at normal load — detects memory leaks, connection exhaustion, and slow degradation.',
+            breakpoint:  'Gradually increasing load until SLA breach — measures maximum sustainable throughput.',
+            scalability: 'Stepped load across increasing VU tiers — measures throughput scaling and saturation points.',
+          };
+          console.log(`  ${C.dim}Auto-creating ${unmappedBasenames.length} Zephyr perf test case(s)...${C.reset}`);
+          for (const basename of unmappedBasenames) {
+            const m = basename.match(/^([A-Z]+-\d+)_([a-z]+)$/);
+            if (!m) continue;
+            const [, storyKey, profile] = m;
+            const pretty = profile.charAt(0).toUpperCase() + profile.slice(1);
+            try {
+              const { key } = await retry(() => createTestCase({
+                title:       `Performance — ${pretty} — ${storyKey}`,
+                description: PROFILE_DESC[profile] || `${pretty} performance test for ${storyKey}.`,
+                priority:    (profile === 'soak' || profile === 'breakpoint') ? 'Low' : 'Normal',
+                tags:        ['performance', `perf-${profile}`, storyKey.toLowerCase()],
+                steps:       [
+                  `Launch k6 with the generated script under tests/perf/${profile}/`,
+                  'Execute the scenario against the configured BASE_URL',
+                  'Evaluate p95/p99/error-rate thresholds and compare against the rolling baseline'
+                ],
+                expected:    'All configured thresholds pass; no dropped iterations; p95/p99 within SLA and baseline tolerance.'
+              }), 3, 1500);
+              tcMap[basename] = key;
+              fs.writeFileSync(tcMapPath, JSON.stringify(tcMap, null, 2) + '\n', 'utf8');
+              console.log(`    ${C.green}✓${C.reset} ${basename} → ${key}`);
+            } catch (e) {
+              logger.warn(`[run-perf] auto-create perf TC failed for ${basename}: ${e.message}`);
+              console.warn(`    ${C.yellow}⚠${C.reset} ${basename} — ${e.message}`);
+            }
+          }
+        } catch (e) {
+          logger.warn(`[run-perf] auto-create perf TC stage error: ${e.message}`);
+        }
       }
 
       const verdictToZephyr = { pass: 'Pass', warn: 'Blocked', fail: 'Fail', 'data-invalid': 'Not Executed' };
@@ -353,9 +429,12 @@ async function main() {
         ].filter(Boolean).join('\n');
 
         if (tcKey) {
+          if (!cycleKey) {
+            console.log(`  ${C.yellow}⚠ Skipping Zephyr sync (no cycle): ${r.basename}${C.reset}`);
+          } else {
           try {
             await retry(() => createExecution(
-              process.env.ZEPHYR_CYCLE_KEY || '',
+              cycleKey,
               tcKey,
               status,
               { comment }
@@ -363,9 +442,11 @@ async function main() {
             console.log(`  ${C.green}✓ Zephyr synced: ${r.basename} → ${status}${C.reset}`);
             syncPassCount++;
           } catch (e) {
-            logger.warn(`[run-perf] Zephyr sync failed for ${r.basename}: ${e.message}`);
-            console.warn(`  ${C.yellow}⚠ Zephyr sync failed: ${r.basename} — ${e.message}${C.reset}`);
+            const detail = e.response?.data ? JSON.stringify(e.response.data) : e.message;
+            logger.warn(`[run-perf] Zephyr sync failed for ${r.basename}: ${detail}`);
+            console.warn(`  ${C.yellow}⚠ Zephyr sync failed: ${r.basename} — ${detail}${C.reset}`);
             syncFailCount++;
+          }
           }
         } else {
           console.log(`  ${C.dim}No Zephyr test case mapped for: ${r.basename}${C.reset}`);
