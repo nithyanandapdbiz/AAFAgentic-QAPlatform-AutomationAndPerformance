@@ -42,7 +42,7 @@ function norm(r) {
     errorRate:   +(m.errorRate   ?? r.errorRate   ?? 0),
     throughput:  +(m.throughput  ?? m.reqRate      ?? r.throughput  ?? 0),
     vusMax:      +(m.vusMax      ?? r.vusMax       ?? 0),
-    totalRequests: +(m.count     ?? r.totalRequests ?? 0),
+    totalRequests: +(m.reqCount  ?? m.count        ?? r.totalRequests ?? 0),
     droppedIterations: +(m.droppedIterations ?? r.droppedIterations ?? 0),
     duration:    r.duration     || '\u2014',
     breaches:    r.breaches     || [],
@@ -118,32 +118,103 @@ function syntheticTimeseries(row) {
   return pts;
 }
 
-// â”€â”€â”€ Load CSV timeseries â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Load timeseries (prefer k6 NDJSON for real per-second data) ───────────
+// The k6 script writes a single-row summary CSV via handleSummary — that is
+// not a usable timeseries. Instead, parse the NDJSON stream emitted by
+// `--out json=<file>` which contains one Point per metric sample, bucket
+// the samples by 5-second windows, and derive (vus, p95, errorRate) per
+// bucket. Fall back to the CSV (if it happens to be multi-row) and finally
+// to a synthetic curve so charts always render something.
 function loadTimeseries(rows) {
   const dir = path.join(ROOT, 'test-results', 'perf');
   const map = {};
-  for (const row of rows) {
-    const csvPath = path.join(dir, row.name + '-timeseries.csv');
-    if (fs.existsSync(csvPath)) {
-      try {
-        const lines   = fs.readFileSync(csvPath, 'utf8').trim().split('\n');
-        const headers = lines[0].split(',').map(h => h.trim());
-        const pts = [];
-        for (let i = 1; i < lines.length; i++) {
-          const vals = lines[i].split(',');
-          const obj  = {};
-          headers.forEach((h, idx) => { obj[h] = vals[idx]?.trim(); });
-          pts.push({
-            t:         parseFloat(obj.elapsed || obj.t || (i * 5)),
-            vus:       parseInt(obj.vus || '0', 10),
-            p95:       parseFloat(obj.p95 || '0'),
-            errorRate: parseFloat(obj.errorRate || obj.error_rate || '0'),
-          });
-        }
-        if (pts.length) { map[row.name] = pts; continue; }
-      } catch (_) { /* fall through */ }
+  const BUCKET_SEC = 5;
+
+  function pct(arr, p) {
+    if (!arr || arr.length === 0) return 0;
+    const sorted = [...arr].sort((a, b) => a - b);
+    return sorted[Math.max(0, Math.ceil((p / 100) * sorted.length) - 1)];
+  }
+
+  function fromNdjson(ndjsonPath) {
+    if (!fs.existsSync(ndjsonPath)) return null;
+    let t0 = null;
+    const buckets = new Map();  // bucketIdx -> { dur:[], fails:[], vus:max }
+    const raw = fs.readFileSync(ndjsonPath, 'utf8');
+    const lines = raw.split('\n');
+    for (const line of lines) {
+      if (!line || line.charCodeAt(0) !== 123 /* '{' */) continue;
+      let obj;
+      try { obj = JSON.parse(line); } catch { continue; }
+      if (obj.type !== 'Point' || !obj.data || !obj.metric) continue;
+      const ts = Date.parse(obj.data.time);
+      if (!Number.isFinite(ts)) continue;
+      if (t0 === null) t0 = ts;
+      const elapsedSec = Math.floor((ts - t0) / 1000);
+      const bucketIdx  = Math.floor(elapsedSec / BUCKET_SEC);
+      let b = buckets.get(bucketIdx);
+      if (!b) { b = { dur: [], fails: [], vus: 0 }; buckets.set(bucketIdx, b); }
+      const v = obj.data.value;
+      if (obj.metric === 'http_req_duration')  b.dur.push(v);
+      else if (obj.metric === 'http_req_failed') b.fails.push(v);
+      else if (obj.metric === 'vus')             b.vus = Math.max(b.vus, v);
     }
-    map[row.name] = syntheticTimeseries(row);
+    if (buckets.size === 0) return null;
+
+    const sorted = [...buckets.entries()].sort((a, b) => a[0] - b[0]);
+    // Fill gaps so the chart doesn't skip empty seconds
+    const maxIdx = sorted[sorted.length - 1][0];
+    const lookup = new Map(sorted);
+    const pts = [];
+    let lastVus = 0;
+    for (let i = 0; i <= maxIdx; i++) {
+      const b = lookup.get(i);
+      const vus = b && b.vus > 0 ? b.vus : lastVus;
+      if (b && b.vus > 0) lastVus = b.vus;
+      const p95 = b && b.dur.length ? pct(b.dur, 95) : 0;
+      const errorRate = b && b.fails.length
+        ? b.fails.reduce((s, x) => s + x, 0) / b.fails.length
+        : 0;
+      pts.push({
+        t: i * BUCKET_SEC,
+        vus: Math.round(vus),
+        p95: Math.round(p95),
+        errorRate: +errorRate.toFixed(4),
+      });
+    }
+    return pts;
+  }
+
+  function fromCsv(csvPath) {
+    if (!fs.existsSync(csvPath)) return null;
+    try {
+      const lines   = fs.readFileSync(csvPath, 'utf8').trim().split('\n');
+      if (lines.length < 3) return null;  // header + single summary row is not a timeseries
+      const headers = lines[0].split(',').map(h => h.trim());
+      const hasElapsed = headers.includes('elapsed') || headers.includes('t');
+      if (!hasElapsed) return null;
+      const pts = [];
+      for (let i = 1; i < lines.length; i++) {
+        const vals = lines[i].split(',');
+        const obj  = {};
+        headers.forEach((h, idx) => { obj[h] = vals[idx]?.trim(); });
+        pts.push({
+          t:         parseFloat(obj.elapsed || obj.t || (i * BUCKET_SEC)),
+          vus:       parseInt(obj.vus || '0', 10),
+          p95:       parseFloat(obj.p95 || '0'),
+          errorRate: parseFloat(obj.errorRate || obj.error_rate || '0'),
+        });
+      }
+      return pts.length ? pts : null;
+    } catch { return null; }
+  }
+
+  for (const row of rows) {
+    const ndjsonPath = path.join(dir, row.name + '.json');
+    const csvPath    = path.join(dir, row.name + '-timeseries.csv');
+    map[row.name] = fromNdjson(ndjsonPath)
+                 || fromCsv(csvPath)
+                 || syntheticTimeseries(row);
   }
   return map;
 }
@@ -1218,39 +1289,57 @@ if (require.main === module) {
 
   const results = [];
   if (fs.existsSync(resultsDir)) {
-    const files = fs.readdirSync(resultsDir).filter(f => f.endsWith('.json') && !f.endsWith('-timeseries.json'));
+    // Only consume k6 --summary-export files. Skip NDJSON streams, threshold
+    // definition snapshots, and timeseries CSVs.
+    const files = fs.readdirSync(resultsDir).filter(f =>
+      f.endsWith('-summary.json') && !f.endsWith('-timeseries.json')
+    );
     for (const f of files) {
       try {
         const raw   = JSON.parse(fs.readFileSync(path.join(resultsDir, f), 'utf8'));
         const items = Array.isArray(raw) ? raw : [raw];
         for (const item of items) {
           if (!item || typeof item !== 'object') continue;
-          const testType = f.replace(/SCRUM-\d+_/, '').replace(/_.*/, '').toLowerCase();
+          // basename without the "-summary" suffix, e.g. "SCRUM-5_load"
+          const basename  = f.replace(/-summary\.json$/, '');
+          const m         = basename.match(/_([a-z]+)$/i);
+          const testType  = (m ? m[1] : 'load').toLowerCase();
           const im = item.metrics || {};
-          const dv = (im.http_req_duration || {}).values || {};
+          // k6 v1.x summaries expose stats flat on the metric; older versions
+          // wrap them inside .values. Support both.
+          const pick = (metric) => {
+            if (!metric) return {};
+            return metric.values && typeof metric.values === 'object' ? metric.values : metric;
+          };
+          const dv = pick(im.http_req_duration);
+          const fv = pick(im.http_req_failed);
+          const rv = pick(im.http_reqs);
+          const vv = pick(im.vus_max);
           const metrics = {
-            p95:  dv['p(95)'] || dv.p95 || 0,
-            p99:  dv['p(99)'] || dv.p99 || 0,
-            p50:  dv['p(50)'] || dv.med  || dv.p50 || 0,
-            p90:  dv['p(90)'] || dv.p90 || 0,
-            avg:  dv.avg   || 0, min: dv.min || 0, max: dv.max || 0,
-            errorRate:  (im.http_req_failed   || {}).values?.rate  || 0,
-            count:      (im.http_reqs         || {}).values?.count || 0,
-            throughput: (im.http_reqs         || {}).values?.rate  || 0,
-            vusMax:     (im.vus_max           || {}).values?.max   || 0,
-            waiting:    (im.http_req_waiting       || {}).values?.avg || 0,
-            blocked:    (im.http_req_blocked       || {}).values?.avg || 0,
-            connecting: (im.http_req_connecting    || {}).values?.avg || 0,
-            tlsHandshake:(im.http_req_tls_handshaking||{}).values?.avg || 0,
-            sending:    (im.http_req_sending       || {}).values?.avg || 0,
-            receiving:  (im.http_req_receiving     || {}).values?.avg || 0,
+            p95:  dv['p(95)'] ?? dv.p95 ?? 0,
+            p99:  dv['p(99)'] ?? dv.p99 ?? 0,
+            p50:  dv['p(50)'] ?? dv.med ?? dv.p50 ?? 0,
+            p90:  dv['p(90)'] ?? dv.p90 ?? 0,
+            avg:  dv.avg ?? 0, min: dv.min ?? 0, max: dv.max ?? 0,
+            errorRate:  fv.rate  ?? fv.value ?? 0,
+            reqCount:   rv.count ?? 0,
+            throughput: rv.rate  ?? 0,
+            vusMax:     vv.max   ?? vv.value ?? 0,
+            waiting:      pick(im.http_req_waiting).avg         ?? 0,
+            blocked:      pick(im.http_req_blocked).avg         ?? 0,
+            connecting:   pick(im.http_req_connecting).avg      ?? 0,
+            tlsHandshake: pick(im.http_req_tls_handshaking).avg ?? 0,
+            sending:      pick(im.http_req_sending).avg         ?? 0,
+            receiving:    pick(im.http_req_receiving).avg       ?? 0,
+            droppedIterations: pick(im.dropped_iterations).count
+                            ?? pick(im.dropped_iterations).value ?? 0,
           };
           const breaches = [];
           if (metrics.p95 > thresholds.p95)             breaches.push({ metric: 'p95', actual: metrics.p95, limit: thresholds.p95 });
           if (metrics.p99 > thresholds.p99)             breaches.push({ metric: 'p99', actual: metrics.p99, limit: thresholds.p99 });
           if (metrics.errorRate > thresholds.errorRate) breaches.push({ metric: 'errorRate', actual: metrics.errorRate, limit: thresholds.errorRate });
           const verdict = breaches.length ? 'fail' : (metrics.p95 > thresholds.p95 * 0.9 || metrics.p99 > thresholds.p99 * 0.9) ? 'warn' : 'pass';
-          results.push({ basename: path.basename(f, '.json'), testType, metrics, verdict, breaches, _source: 'summary-export' });
+          results.push({ basename, testType, metrics, verdict, breaches, _source: 'summary-export' });
         }
       } catch (_) { /* skip malformed */ }
     }

@@ -1,6 +1,6 @@
 // storyKey: SCRUM-5
 // testType: spike
-// generated: 2026-04-24T01:02:00.363Z
+// generated: 2026-04-24T01:19:54.373Z
 // WARNING: Journey could not be inferred — manual customisation required.
 
 import http from 'k6/http';
