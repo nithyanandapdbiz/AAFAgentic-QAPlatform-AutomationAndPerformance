@@ -1,5 +1,5 @@
 // =============================================================================
-// Zephyr Test Case : SCRUM-T2231
+// Zephyr Test Case : SCRUM-T2654
 // Title            : Verify boundary values are handled correctly for Employee Creation in OrangeHRM
 // Priority         : Normal
 // Labels           : boundary, edge-case, bva, scrum-5
@@ -23,7 +23,7 @@
 const { test, expect }                = require('../fixtures/base.fixture');
 const { CREDENTIALS, TEST_EMPLOYEE } = require('../data/testData');
 
-test.describe('SCRUM-T2231 | Verify boundary values are handled correctly for Employee Creation in OrangeHRM', () => {
+test.describe('SCRUM-T2654 | Verify boundary values are handled correctly for Employee Creation in OrangeHRM', () => {
 
   test('Verify boundary values are handled correctly for Employee Creation in OrangeHRM', async ({ page, loginPage, addEmployeePage, employeeListPage, sh, uniqueSuffix }, testInfo) => {
 

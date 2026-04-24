@@ -1,5 +1,5 @@
 // =============================================================================
-// Zephyr Test Case : SCRUM-T2230
+// Zephyr Test Case : SCRUM-T2653
 // Title            : Verify Employee Creation in OrangeHRM rejects invalid input data
 // Priority         : Normal
 // Labels           : validation, negative, invalid-data, ep-invalid, security-eg, scrum-5
@@ -25,7 +25,7 @@
 const { test, expect }                = require('../fixtures/base.fixture');
 const { CREDENTIALS, TEST_EMPLOYEE } = require('../data/testData');
 
-test.describe('SCRUM-T2230 | Verify Employee Creation in OrangeHRM rejects invalid input data', () => {
+test.describe('SCRUM-T2653 | Verify Employee Creation in OrangeHRM rejects invalid input data', () => {
 
   test('Verify Employee Creation in OrangeHRM rejects invalid input data', async ({ page, loginPage, addEmployeePage, employeeListPage, sh, uniqueSuffix }, testInfo) => {
 

@@ -1,5 +1,5 @@
 // =============================================================================
-// Zephyr Test Case : SCRUM-T2235
+// Zephyr Test Case : SCRUM-T2658
 // Title            : Verify Employee Creation in OrangeHRM with the maximum number of records
 // Priority         : Normal
 // Labels           : boundary, edge-case, performance, bva-volume, scrum-5
@@ -23,7 +23,7 @@
 const { test, expect }                = require('../fixtures/base.fixture');
 const { CREDENTIALS, TEST_EMPLOYEE } = require('../data/testData');
 
-test.describe('SCRUM-T2235 | Verify Employee Creation in OrangeHRM with the maximum number of records', () => {
+test.describe('SCRUM-T2658 | Verify Employee Creation in OrangeHRM with the maximum number of records', () => {
 
   test('Verify Employee Creation in OrangeHRM with the maximum number of records', async ({ page, loginPage, addEmployeePage, employeeListPage, sh, uniqueSuffix }, testInfo) => {
 

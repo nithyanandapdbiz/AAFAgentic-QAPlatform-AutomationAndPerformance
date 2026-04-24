@@ -1,5 +1,5 @@
 // =============================================================================
-// Zephyr Test Case : SCRUM-T2234
+// Zephyr Test Case : SCRUM-T2657
 // Title            : Verify data is persisted correctly after Employee Creation in OrangeHRM
 // Priority         : Normal
 // Labels           : data-integrity, persistence, regression, state-transition, scrum-5
@@ -25,7 +25,7 @@
 const { test, expect }                = require('../fixtures/base.fixture');
 const { CREDENTIALS, TEST_EMPLOYEE } = require('../data/testData');
 
-test.describe('SCRUM-T2234 | Verify data is persisted correctly after Employee Creation in OrangeHRM', () => {
+test.describe('SCRUM-T2657 | Verify data is persisted correctly after Employee Creation in OrangeHRM', () => {
 
   test('Verify data is persisted correctly after Employee Creation in OrangeHRM', async ({ page, loginPage, addEmployeePage, employeeListPage, sh, uniqueSuffix }, testInfo) => {
 
