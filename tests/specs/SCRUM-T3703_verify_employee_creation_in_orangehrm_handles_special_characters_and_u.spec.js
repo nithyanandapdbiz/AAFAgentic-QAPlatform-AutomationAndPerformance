@@ -1,5 +1,5 @@
 // =============================================================================
-// Zephyr Test Case : SCRUM-T2655
+// Zephyr Test Case : SCRUM-T3703
 // Title            : Verify Employee Creation in OrangeHRM handles special characters and unicode
 // Priority         : Normal
 // Labels           : edge-case, special-characters, unicode, error-guessing, scrum-5
@@ -22,7 +22,7 @@
 const { test, expect }                = require('../fixtures/base.fixture');
 const { CREDENTIALS, TEST_EMPLOYEE } = require('../data/testData');
 
-test.describe('SCRUM-T2655 | Verify Employee Creation in OrangeHRM handles special characters and unicode', () => {
+test.describe('SCRUM-T3703 | Verify Employee Creation in OrangeHRM handles special characters and unicode', () => {
 
   test('Verify Employee Creation in OrangeHRM handles special characters and unicode', async ({ page, loginPage, addEmployeePage, employeeListPage, sh, uniqueSuffix }, testInfo) => {
 
